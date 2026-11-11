@@ -1,0 +1,15 @@
+[package]
+name = "hitch-context"
+description = "Context engine: watches focus and plugin reports, resolves them into contexts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+hitch-protocol.workspace = true
+hitch-store.workspace = true
+
+[lints]
+workspace = true

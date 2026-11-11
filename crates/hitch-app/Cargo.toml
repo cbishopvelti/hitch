@@ -1,0 +1,21 @@
+[package]
+name = "hitch-app"
+description = "The Hitch desktop app: panel, quick capture and the hitch CLI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "hitch"
+path = "src/main.rs"
+
+[dependencies]
+hitch-protocol.workspace = true
+hitch-store.workspace = true
+hitch-context.workspace = true
+iced.workspace = true
+
+[lints]
+workspace = true
