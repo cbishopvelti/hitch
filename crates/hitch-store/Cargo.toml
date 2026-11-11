@@ -1,0 +1,14 @@
+[package]
+name = "hitch-store"
+description = "HITCH.md files, project folder resolution and the search index"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+hitch-protocol.workspace = true
+
+[lints]
+workspace = true
