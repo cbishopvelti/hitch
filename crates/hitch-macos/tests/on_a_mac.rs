@@ -5,8 +5,8 @@
 //! What a CI runner can show: the Accessibility state is reported, an app
 //! switch (opening TextEdit) is seen through NSWorkspace, and pinning with
 //! no windows, shortcuts and teardown don't crash. Window titles need the
-//! Accessibility permission, which a runner doesn't grant, so those are
-//! only checked when it is there.
+//! Accessibility permission, so those are only checked when it is there
+//! (GitHub's macOS runners have it).
 
 #[cfg(target_os = "macos")]
 fn main() {
@@ -54,9 +54,13 @@ fn main() {
     let trusted = events.contains(&FocusEvent::Accessibility(true));
     println!("accessibility trusted: {trusted}");
 
-    // An app switch.
+    // An app switch, to a window showing a file.
+    let file = std::env::temp_dir().join(format!("hitch-on-a-mac-{}.txt", std::process::id()));
+    std::fs::write(&file, "Hitch test\n").unwrap();
+    let file_name = file.file_name().unwrap().to_str().unwrap().to_owned();
     let opened = Command::new("open")
         .args(["-a", "TextEdit"])
+        .arg(&file)
         .status()
         .is_ok_and(|s| s.success());
     assert!(opened, "could not open TextEdit");
@@ -67,7 +71,20 @@ fn main() {
                 if f.bundle_id == "com.apple.TextEdit" && f.name == "TextEdit" && f.pid > 0)
         })
     });
+    // With the permission, the window's title and file come through too.
+    let window_seen = trusted
+        && pump(Duration::from_secs(20), || {
+            drain(&mut events);
+            events.iter().any(|e| {
+                matches!(e, FocusEvent::Focus(f)
+                    if f.bundle_id == "com.apple.TextEdit"
+                        && f.title.contains(&file_name)
+                        && f.document.as_ref().and_then(|d| d.file_name())
+                            == Some(std::ffi::OsStr::new(&file_name)))
+            })
+        });
     let _ = Command::new("pkill").args(["-x", "TextEdit"]).status();
+    let _ = std::fs::remove_file(&file);
     for e in &events {
         if let FocusEvent::Focus(f) = e {
             // Titles are fine to print here: it's a CI runner.
@@ -78,6 +95,12 @@ fn main() {
         }
     }
     assert!(seen, "TextEdit's activation was not reported");
+    if trusted {
+        assert!(
+            window_seen,
+            "TextEdit's window title and file were not reported"
+        );
+    }
 
     // Pinning with no windows open, and shortcuts that parse.
     hitch_macos::set_keep_above(true);
