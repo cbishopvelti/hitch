@@ -3,9 +3,11 @@
 //! Turns raw signals into the contexts the panel shows (see `docs/SPEC.md`,
 //! "What a context is" and "Architecture and platform"):
 //!
-//! - **Watcher**: the GNOME Shell extension over D-Bus (focused window), the
+//! - **Watcher**: the GNOME Shell extension over D-Bus (focused window) on
+//!   Linux, NSWorkspace and the Accessibility API on macOS (frontmost app,
+//!   window title and represented file, through the `hitch-macos` crate), the
 //!   local socket (Zed and Zellij reports, CLI commands), and clawswap's
-//!   `/focus/events` stream. macOS detection comes later.
+//!   `/focus/events` stream.
 //! - **Resolver**: applies the ignore list first, then derives contexts from
 //!   reports, preferring an exact plugin report while that app is frontmost.
 //! - **Debounce**: about 300 ms, so fast switching doesn't flicker.
@@ -15,19 +17,22 @@
 //!
 //! The app starts an [`Engine`] and gets [`Event`]s from it. Each focus
 //! source pushes into an [`InputSink`]: the socket server, the
-//! GNOME Shell watcher ([`gnome`]), the [`clawswap`] client, and later macOS
-//! detection. The [`resolve::Resolver`] decides what is current.
+//! GNOME Shell watcher (`gnome`, Linux), macOS detection (`macos`), and the
+//! [`clawswap`] client. The [`resolve::Resolver`] decides what is current.
 
 pub mod clawswap;
 mod engine;
 #[cfg(target_os = "linux")]
 pub mod gnome;
+#[cfg(target_os = "macos")]
+mod macos;
+pub mod permissions;
 pub mod project;
 pub mod resolve;
 mod server;
 pub mod title;
 
-pub use engine::{Config, Engine, Event, InputSink};
+pub use engine::{Config, Engine, Event, InputSink, MACOS_SHORTCUTS};
 pub use hitch_protocol::{Context, ContextReport, Source};
 pub use project::{FsProjectFinder, ProjectFinder};
 pub use resolve::{AppTable, IgnoreList, Resolver, WindowFocus};

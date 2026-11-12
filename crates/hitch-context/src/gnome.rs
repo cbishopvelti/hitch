@@ -121,5 +121,6 @@ fn focus_from_map(map: &HashMap<String, OwnedValue>) -> WindowFocus {
             .and_then(|v| v.downcast_ref::<u32>().ok())
             .unwrap_or(0),
         sandboxed_app_id: s("sandboxed_app_id"),
+        document: None,
     }
 }

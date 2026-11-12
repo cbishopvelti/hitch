@@ -4,6 +4,7 @@ members = [
     "crates/hitch-protocol",
     "crates/hitch-store",
     "crates/hitch-context",
+    "crates/hitch-macos",
     "crates/hitch-app",
 ]
 # Editor and terminal plugins build for wasm with their own toolchains and
@@ -20,6 +21,7 @@ repository = "https://github.com/cbishopvelti/hitch"
 hitch-protocol = { path = "crates/hitch-protocol" }
 hitch-store = { path = "crates/hitch-store" }
 hitch-context = { path = "crates/hitch-context" }
+hitch-macos = { path = "crates/hitch-macos" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

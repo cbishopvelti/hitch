@@ -1,0 +1,76 @@
+[package]
+name = "hitch-macos"
+description = "macOS glue for Hitch: frontmost app and window via NSWorkspace and Accessibility, pinning, global shortcuts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+# Empty on other platforms, so the workspace builds everywhere.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+dispatch2 = "0.3"
+global-hotkey = "0.10"
+libc = "0.2"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "libc",
+    "NSApplication",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSWindow",
+    "NSWorkspace",
+] }
+objc2-application-services = { version = "0.3", default-features = false, features = [
+    "std",
+    "libc",
+    "AXError",
+    "AXUIElement",
+    "HIServices",
+] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "CFDictionary",
+    "CFNumber",
+    "CFRunLoop",
+    "CFString",
+    "CFURL",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "NSArray",
+    "NSDictionary",
+    "NSEnumerator",
+    "NSNotification",
+    "NSObject",
+    "NSOperation",
+    "NSString",
+    "NSURL",
+] }
+
+# The one crate that talks to Cocoa and the Accessibility API, so the one
+# crate that needs `unsafe`. The rest of the workspace forbids it.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "CFDate",
+    "CFRunLoop",
+    "CFString",
+] }
+
+# Cocoa wants the main thread, which the default test harness keeps for
+# itself, so this test brings its own `main`.
+[[test]]
+name = "on_a_mac"
+harness = false

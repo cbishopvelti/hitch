@@ -15,14 +15,14 @@ use crate::ActiveContexts;
 use crate::project::ProjectFinder;
 use crate::title;
 
-/// The focused window, as the GNOME Shell extension (or later macOS
-/// detection) reports it. Mirrors the extension's `focus` dictionary in
+/// The focused window, as the GNOME Shell extension or macOS detection
+/// reports it. Mirrors the extension's `focus` dictionary in
 /// `docs/PROTOCOL.md`; every field is empty or 0 when nothing is focused.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WindowFocus {
     /// Desktop file id without `.desktop` (macOS: bundle id).
     pub app_id: String,
-    /// Wayland app_id or X11 WM_CLASS.
+    /// Wayland app_id or X11 WM_CLASS (macOS: the app's name).
     pub wm_class: String,
     /// Window title. Matched against, never stored beyond the next switch.
     pub title: String,
@@ -30,6 +30,10 @@ pub struct WindowFocus {
     pub pid: u32,
     /// Flatpak or Snap id.
     pub sandboxed_app_id: String,
+    /// The file or folder the window represents, when the platform says
+    /// (macOS `AXDocument`: Zed, TextEdit, Xcode, Terminal). More reliable
+    /// than a path in the title.
+    pub document: Option<PathBuf>,
 }
 
 impl WindowFocus {
@@ -116,6 +120,9 @@ impl Default for AppTable {
                         "rio",
                         "com.apple.terminal",
                         "com.googlecode.iterm2",
+                        // macOS bundle ids not covered above.
+                        "net.kovidgoyal.kitty",
+                        "com.github.wez.wezterm",
                     ]),
                 ),
                 (
@@ -140,6 +147,10 @@ impl Default for AppTable {
                         "zen*",
                         "app.zen_browser.zen",
                         "com.apple.safari",
+                        // macOS bundle ids not covered above.
+                        "com.apple.safaritechnologypreview",
+                        "company.thebrowser.browser",
+                        "app.zen-browser.zen",
                     ]),
                 ),
             ],
@@ -350,7 +361,11 @@ impl Resolver {
                         }
                     }
                 }
-                Some(ZedTitle::FileName { .. }) => self.zed_needs_setting = true,
+                // On macOS Zed also names its file in `AXDocument`, which
+                // needs no setting.
+                Some(ZedTitle::FileName { .. }) if w.document.is_none() => {
+                    self.zed_needs_setting = true;
+                }
                 _ => {}
             }
         }
@@ -377,6 +392,13 @@ impl Resolver {
             let ctx = self.contexts_from_report(&r.report);
             if !ctx.is_empty() {
                 return self.set_sticky(ctx);
+            }
+        }
+
+        if let Some(doc) = &w.document {
+            let from_doc = self.contexts_from_path(doc);
+            if !from_doc.is_empty() {
+                return self.set_sticky(from_doc);
             }
         }
 
@@ -486,13 +508,26 @@ impl Resolver {
             if self.ignore.path(&p) {
                 return Vec::new();
             }
-            if p.is_file() {
-                let dir = p.parent().unwrap_or(Path::new("/"));
-                return self.file_contexts(&p, dir, None);
+            let ctx = self.contexts_from_path(&p);
+            if !ctx.is_empty() {
+                return ctx;
             }
-            if p.is_dir() {
-                return self.folder_contexts(self.finder.project_for(&p, None));
-            }
+        }
+        Vec::new()
+    }
+
+    /// Contexts for a file or folder on disk; empty if it isn't there or is
+    /// ignored.
+    fn contexts_from_path(&self, p: &Path) -> Vec<Context> {
+        if !p.is_absolute() || self.ignore.path(p) {
+            return Vec::new();
+        }
+        if p.is_file() {
+            let dir = p.parent().unwrap_or(Path::new("/"));
+            return self.file_contexts(p, dir, None);
+        }
+        if p.is_dir() {
+            return self.folder_contexts(self.finder.project_for(p, None));
         }
         Vec::new()
     }
@@ -769,6 +804,68 @@ mod tests {
         t.r.resolve();
         assert!(t.r.take_zed_title_hint());
         assert!(!t.r.take_zed_title_hint());
+    }
+
+    fn window_with_document(t: &mut T, app_id: &str, title: &str, doc: &Path) {
+        let now = t.now();
+        t.r.window_focus(
+            WindowFocus {
+                app_id: app_id.into(),
+                wm_class: app_id.into(),
+                title: title.into(),
+                pid: 1,
+                document: Some(doc.into()),
+                ..Default::default()
+            },
+            now,
+        );
+    }
+
+    #[test]
+    fn macos_document_gives_the_file() {
+        let d = TempDir::new("res-axdoc");
+        d.dir("hitch/.git");
+        let f = d.file("hitch/src/main.rs");
+        let mut t = T::new();
+        // Zed's default title has no path; AXDocument does, so no hint.
+        window_with_document(&mut t, "dev.zed.Zed", "hitch — main.rs", &f);
+        assert_eq!(
+            t.r.resolve().contexts[0],
+            Context::File {
+                project: d.path("hitch"),
+                file: "src/main.rs".into()
+            }
+        );
+        assert!(!t.r.take_zed_title_hint());
+
+        // A folder (Terminal's AXDocument is its working folder).
+        window_with_document(&mut t, "com.apple.TextEdit", "", &d.path("hitch/src"));
+        assert_eq!(t.r.resolve().contexts, vec![folder(d.path("hitch"))]);
+
+        // A document in an ignored folder counts as none.
+        t.r.set_ignore(IgnoreList {
+            folders: vec![d.path("hitch")],
+            ..Default::default()
+        });
+        window_with_document(&mut t, "com.apple.TextEdit", "", &f);
+        let out = t.r.resolve();
+        assert!(
+            !out.contexts
+                .iter()
+                .any(|c| matches!(c, Context::File { .. }))
+        );
+    }
+
+    #[test]
+    fn plugin_report_beats_document() {
+        let d = TempDir::new("res-axdoc-zellij");
+        d.dir("a/.git");
+        d.dir("b/.git");
+        let mut t = T::new();
+        t.window("com.apple.Terminal", "");
+        t.report(zellij(&d.path("b")));
+        window_with_document(&mut t, "com.apple.Terminal", "", &d.path("a"));
+        assert_eq!(t.r.resolve().contexts[0], folder(d.path("b")));
     }
 
     #[test]
