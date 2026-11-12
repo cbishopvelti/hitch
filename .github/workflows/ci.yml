@@ -55,7 +55,9 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # Includes hitch-macos's on_a_mac test, which runs the focus watcher on
       # the runner's desktop session.
-      - run: cargo test --workspace
+      - run: cargo test --workspace --no-fail-fast
+        env:
+          RUST_BACKTRACE: 1
       - name: Build Hitch.app
         run: packaging/macos/build-app.sh
       - uses: actions/upload-artifact@v4

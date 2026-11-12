@@ -58,6 +58,7 @@ fn start(sock: &Path, dbus: Option<String>) -> (Engine, mpsc::Receiver<Event>) {
 }
 
 /// The next event that `pick` accepts, skipping others.
+#[track_caller]
 fn next<T>(rx: &mpsc::Receiver<Event>, pick: impl Fn(Event) -> Option<T>) -> T {
     let deadline = std::time::Instant::now() + WAIT;
     loop {
@@ -69,6 +70,7 @@ fn next<T>(rx: &mpsc::Receiver<Event>, pick: impl Fn(Event) -> Option<T>) -> T {
     }
 }
 
+#[track_caller]
 fn contexts(rx: &mpsc::Receiver<Event>) -> Vec<Context> {
     next(rx, |e| match e {
         Event::Contexts(c) => Some(c.contexts),
