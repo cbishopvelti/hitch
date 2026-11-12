@@ -1,0 +1,22 @@
+[package]
+name = "hitch-zellij"
+description = "Zellij plugin that reports the focused pane's folder to Hitch and types Hitch's commands into it"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+repository = "https://github.com/cbishopvelti/hitch"
+publish = false
+
+# Not a member of the root workspace: it builds for wasm32-wasip1 with its own
+# dependencies. Build with `cargo build --release --target wasm32-wasip1`.
+
+[dependencies]
+hitch-protocol = { path = "../../crates/hitch-protocol" }
+serde_json = "1"
+zellij-tile = "0.46"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
