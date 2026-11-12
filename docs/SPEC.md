@@ -45,7 +45,7 @@ The main context is a file on disk. Wherever Hitch can tell which file or projec
 
 **Matching rules**
 
-1. A file resolves to its project folder: the nearest folder with a HITCH.md, else the nearest with a `.git` folder.
+1. A file resolves to its project folder: the nearest folder with either a HITCH.md or a `.git` folder.
 2. The panel shows notes tagged for the current file first, then the rest of the project's HITCH.md, then any HITCH.md in parent folders.
 3. Switching to an app that reports no file, such as a chat app, keeps the last file's notes on screen. This is what makes a pinned panel useful while you work in another window.
 4. A new note is tagged with the current file by default; one click makes it project-wide.
@@ -126,7 +126,7 @@ Notes live next to the work. Each folder context keeps its notes in one Markdown
 | File | The HITCH.md of its project folder, in a section tagged with the file's relative path |
 | App, web site, web page, window title | A fallback folder, one file per context, e.g. `~/.hitch/apps/figma.md` |
 
-**Finding the project folder.** Hitch walks up from the current path and picks the nearest folder that already has a HITCH.md. If there is none, it picks the nearest folder with a `.git` folder, and failing that the folder itself. Every HITCH.md on the way up is shown too, so notes in ~/playground also appear inside ~/playground/boodle.
+**Finding the project folder.** Hitch walks up from the current path and picks the nearest folder that has a HITCH.md or a `.git` folder, and failing that the folder itself. So a git repo with no notes yet is still its own project, rather than adding its first note to a HITCH.md further up. Every HITCH.md on the way up is shown too, so notes in ~/playground also appear inside ~/playground/boodle.
 
 ```markdown
 # Hitch notes
