@@ -1167,6 +1167,7 @@ dependencies = [
  "hitch-store",
  "serde",
  "serde_json",
+ "zbus",
 ]
 
 [[package]]
