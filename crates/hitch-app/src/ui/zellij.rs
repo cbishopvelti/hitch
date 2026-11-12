@@ -50,12 +50,17 @@ pub enum Route {
 #[derive(Debug, Clone)]
 pub struct Zellij {
     program: std::path::PathBuf,
+    /// Arguments before zellij's own (the stand-in script, in tests).
+    #[cfg(test)]
+    pre_args: Vec<std::path::PathBuf>,
 }
 
 impl Default for Zellij {
     fn default() -> Self {
         Self {
             program: "zellij".into(),
+            #[cfg(test)]
+            pre_args: Vec::new(),
         }
     }
 }
@@ -65,6 +70,18 @@ impl Zellij {
     fn at(program: impl Into<std::path::PathBuf>) -> Self {
         Self {
             program: program.into(),
+            pre_args: Vec::new(),
+        }
+    }
+
+    /// Runs `script` with `sh`. Executing a script the test just wrote can
+    /// fail with ETXTBSY while another test thread's fork still holds it
+    /// open for writing; `sh` only reads it.
+    #[cfg(test)]
+    fn script(script: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            program: "/bin/sh".into(),
+            pre_args: vec![script.into()],
         }
     }
 
@@ -165,7 +182,10 @@ impl Zellij {
         args: impl IntoIterator<Item = &'a str>,
         timeout: Duration,
     ) -> io::Result<Output> {
-        let mut child = Command::new(&self.program)
+        let mut command = Command::new(&self.program);
+        #[cfg(test)]
+        command.args(&self.pre_args);
+        let mut child = command
             .args(args.into_iter().map(OsStr::new))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -236,7 +256,7 @@ mod tests {
         }
 
         fn zellij(&self) -> Zellij {
-            Zellij::at(self.dir.join("zellij"))
+            Zellij::script(self.dir.join("zellij"))
         }
 
         /// The argument lists of each run, after `list-sessions`.
