@@ -1,0 +1,51 @@
+name: GNOME Shell extension
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'integrations/gnome-shell/**'
+      - '.github/workflows/gnome-shell.yml'
+  pull_request:
+    paths:
+      - 'integrations/gnome-shell/**'
+      - '.github/workflows/gnome-shell.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  headless:
+    name: GNOME Shell ${{ matrix.gnome }} (Ubuntu ${{ matrix.ubuntu }})
+    runs-on: ubuntu-latest
+    container: ubuntu:${{ matrix.ubuntu }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { ubuntu: '26.04', gnome: '50' }
+          - { ubuntu: '26.10', gnome: '51' }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GNOME Shell
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update -q
+          apt-get install -y -q --no-install-recommends $(cat integrations/gnome-shell/test/packages.txt)
+
+      - name: Check the GNOME Shell version
+        run: gnome-shell --version | grep -E "^GNOME Shell ${{ matrix.gnome }}\."
+
+      - name: Run the extension in a headless GNOME Shell
+        run: integrations/gnome-shell/test/run-headless.sh
+
+      - name: Pack the extension
+        run: apt-get install -y -q --no-install-recommends make && make -C integrations/gnome-shell pack
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hitch-gnome-extension-gnome${{ matrix.gnome }}
+          path: integrations/gnome-shell/dist/*.zip

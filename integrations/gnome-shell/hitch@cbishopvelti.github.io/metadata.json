@@ -1,0 +1,8 @@
+{
+  "uuid": "hitch@cbishopvelti.github.io",
+  "name": "Hitch",
+  "description": "Tells the Hitch notes app which window is focused, and keeps the Hitch panel on top when it is pinned. Window titles are only sent over the local session bus, never stored or sent anywhere else.",
+  "shell-version": ["50", "51"],
+  "url": "https://github.com/cbishopvelti/hitch",
+  "version-name": "0.1.0"
+}

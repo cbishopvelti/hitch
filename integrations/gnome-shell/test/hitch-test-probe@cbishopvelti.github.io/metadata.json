@@ -1,0 +1,6 @@
+{
+  "uuid": "hitch-test-probe@cbishopvelti.github.io",
+  "name": "Hitch test probe",
+  "description": "Test only. Lets test/check.py ask the shell for the real state of its windows. Never install this outside the headless test.",
+  "shell-version": ["50", "51"]
+}
