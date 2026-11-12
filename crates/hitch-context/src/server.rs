@@ -174,7 +174,10 @@ fn accept_loop(listener: UnixListener, stop: Arc<AtomicBool>, clients: Clients, 
 }
 
 fn serve(id: u64, stream: UnixStream, clients: &Clients, sink: &InputSink) -> io::Result<()> {
-    stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
+    // macOS refuses socket options with EINVAL once the peer has closed,
+    // which a one-shot client like `hitch toggle` often has by now. Its
+    // message is still there to read, so carry on without the timeout.
+    let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
     let mut writer = stream.try_clone()?;
     let mut reader = BufReader::new(stream);
     let mut buf = Vec::new();
