@@ -92,10 +92,11 @@ Zed extensions and Zellij plugins run as wasm and may not be able to open a Unix
 
 **Zellij (confirmed with Zellij 0.46):** the plugin uses both CLI routes.
 
-- Each report is one `hitch send '<hello>' '<context>'`. The `hello` (capability `write_chars`) and the `context` (with `session`) arrive on the same one-shot connection, so Hitch learns from every report that this session has the plugin, even after Hitch restarts. There is no `welcome` back. If `hitch send` fails, the plugin retries the newest report with backoff (1 s, doubling to 30 s).
+- Each report is one `hitch send '<hello>' '<context>'`. The `hello` (capability `write_chars`) and the `context` (with `session`) arrive on the same one-shot connection, so Hitch learns from every report that this session has the plugin, even after Hitch restarts; a report for that session without a `hello` makes Hitch forget it. There is no `welcome` back: the connection has closed by then, and Hitch keeps reading the lines after the `hello` anyway. If `hitch send` fails, the plugin retries the newest report with backoff (1 s, doubling to 30 s).
 - `blur` is sent only when the plugin gets Zellij's before-close event. Zellij can't tell when its terminal window loses OS focus; that comes from window detection.
-- `zellij pipe --name hitch` exits 0 once the plugin has typed the text, and exits 1 with a one-line reason on stdout when it couldn't (no terminal pane focused yet, permissions missing, bad JSON).
-- Hitch must not pipe to a session whose plugin hasn't said `hello`: with no plugin listening, `zellij pipe` waits forever. Use `action write-chars` for those sessions, and put a timeout (about 2 s) on the pipe in case the plugin was unloaded since. `zellij --session <unknown> pipe` exits 0 after printing the session list, so check the session exists first.
+- `zellij pipe --name hitch` prints `typed` and exits 0 once the plugin has typed the text, and exits 1 with a one-line reason on stdout when it couldn't (no terminal pane focused yet, permissions missing, bad JSON).
+- With no plugin listening, `zellij pipe` waits forever if its stdin is open, and exits 0 printing nothing if its stdin is closed. So Hitch pipes only to sessions whose plugin said `hello`, with stdin closed and a 2 s timeout, and counts the text as typed only when it sees `typed`; otherwise it falls back to `action write-chars`. `zellij --session <unknown> pipe` exits 0 after printing the session list, so Hitch checks the session exists first (`zellij list-sessions`).
+- The fallback types the same keystrokes as the plugin (`hitch_protocol::keys`): trailing newlines dropped, several lines sent as one bracketed paste so none of them runs, and Enter (`\r`) only with `submit`.
 - A pipe without `--plugin` goes to every plugin instance in the session, so several Hitch instances would each type the text. Load it once, with `load_plugins`.
 
 ## GNOME Shell extension (D-Bus)

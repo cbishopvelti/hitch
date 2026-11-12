@@ -15,7 +15,7 @@ mod report;
 
 use std::collections::BTreeMap;
 
-use hitch_protocol::{ServerMessage, frame};
+use hitch_protocol::{ServerMessage, ZELLIJ_PIPE_ACK, frame};
 use zellij_tile::prelude::*;
 
 use focus::FocusTracker;
@@ -165,9 +165,12 @@ impl ZellijPlugin for HitchPlugin {
         if let PipeSource::Cli(pipe_id) = &msg.source {
             // Tell `zellij pipe` (Hitch) whether it worked, so it can fall
             // back to `zellij action write-chars`.
-            if let Err(e) = &result {
-                cli_pipe_output(pipe_id, &format!("{e}\n"));
-                set_cli_pipe_exit_code(pipe_id, 1);
+            match &result {
+                Ok(()) => cli_pipe_output(pipe_id, &format!("{ZELLIJ_PIPE_ACK}\n")),
+                Err(e) => {
+                    cli_pipe_output(pipe_id, &format!("{e}\n"));
+                    set_cli_pipe_exit_code(pipe_id, 1);
+                }
             }
             unblock_cli_pipe_input(pipe_id);
         }

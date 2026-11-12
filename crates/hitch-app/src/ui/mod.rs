@@ -19,14 +19,22 @@
 //!   a live preview; Esc or Ctrl+S saves. "+ Note" (or `hitch capture`,
 //!   Ctrl+Shift+H) starts a new note hitched to the most specific context,
 //!   with a dropdown to pick another. Task checkboxes toggle in place.
+//! - **Copy and send** (spec F12, F13): every note and code block has a
+//!   Copy button; a code block's copies its code without the fences. Code
+//!   blocks also have Send to Zellij, which types the code into the last
+//!   focused Zellij pane unrun (Shift+click runs it; see [`zellij`]). With
+//!   the panel focused and no text field taking keys, 1 to 9 copy the code
+//!   blocks in order and Shift+1 to 9 send them.
 
 mod backend;
 mod label;
 mod note_view;
 mod panel_state;
+mod zellij;
 
 use std::fmt;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use hitch_context::ActiveContexts;
 use hitch_protocol::{Command, Context};
@@ -43,7 +51,7 @@ use iced::{
 };
 
 use backend::{Engine, NoteGroup, Store, Watcher};
-use note_view::{NoteViewer, TaskTarget};
+use note_view::{Done, NoteViewer, Spot, TaskTarget};
 use panel_state::{Edge, PanelState};
 
 /// Panel size from the spec: about 320 px wide.
@@ -52,6 +60,8 @@ const PANEL_HEIGHT: f32 = 560.0;
 /// Gap between the docked panel and the screen edge (and the top bar).
 const DOCK_MARGIN: f32 = 48.0;
 const TEXT_SIZE: u32 = 14;
+/// How long a button says "Copied" or "Sent".
+const FLASH: Duration = Duration::from_millis(1500);
 
 #[cfg(target_os = "macos")]
 const MOD: &str = "Cmd";
@@ -109,6 +119,16 @@ struct Panel {
     error: Option<String>,
     /// Setup hints from the engine, until dismissed.
     notices: Vec<Notice>,
+    /// Hitch's own clipboard, kept for as long as Hitch runs (see
+    /// Cargo.toml). `None` if it couldn't start; iced's is used then.
+    clipboard: Option<arboard::Clipboard>,
+    /// A Zellij session has reported, so code blocks can be sent to it.
+    can_send: bool,
+    /// The modifier keys held now, for Shift+click on Send.
+    modifiers: Modifiers,
+    /// The button that just copied or sent, and which flash this is.
+    flash: Option<(Spot, Done)>,
+    flash_count: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,6 +232,23 @@ pub enum Message {
         done: bool,
     },
     LinkClicked(Uri),
+    /// Copy `text`; the button at `spot` says "Copied".
+    Copy {
+        text: String,
+        spot: Spot,
+    },
+    /// Type `text` into the last focused Zellij pane; Shift+click runs it.
+    SendToZellij {
+        text: String,
+        spot: Spot,
+    },
+    Sent {
+        spot: Spot,
+        result: Result<(), String>,
+    },
+    /// The flash numbered this is over.
+    FlashOver(u64),
+    ModifiersChanged(Modifiers),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -238,6 +275,10 @@ pub enum Shortcut {
     TogglePin,
     /// Ctrl/Cmd+Q.
     Quit,
+    /// 1 to 9: copy the code block with this number, counting from 0.
+    CopyBlock(usize),
+    /// Shift+1 to 9: send it to Zellij, unrun.
+    SendBlock(usize),
 }
 
 impl Panel {
@@ -261,6 +302,11 @@ impl Panel {
             mode: theme::Mode::None,
             error: None,
             notices: Vec::new(),
+            clipboard: arboard::Clipboard::new().ok(),
+            can_send: false,
+            modifiers: Modifiers::empty(),
+            flash: None,
+            flash_count: 0,
         };
         if panel.state.pinned {
             panel.keep_above();
@@ -296,6 +342,7 @@ impl Panel {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Engine(backend::Event::Contexts(contexts)) => {
+                self.can_send = self.engine.zellij_target().is_some();
                 if contexts != self.contexts {
                     self.contexts = contexts;
                     self.reload();
@@ -381,7 +428,107 @@ impl Panel {
                 self.report(open_url(&url));
                 Task::none()
             }
+            Message::Copy { text, spot } => self.copy(text, spot),
+            Message::SendToZellij { text, spot } => {
+                self.send_to_zellij(text, spot, self.modifiers.shift())
+            }
+            Message::Sent { spot, result } => match result {
+                Ok(()) => {
+                    self.error = None;
+                    self.flash(spot, Done::Sent)
+                }
+                Err(e) => {
+                    self.error = Some(e);
+                    Task::none()
+                }
+            },
+            Message::FlashOver(count) => {
+                if count == self.flash_count {
+                    self.flash = None;
+                }
+                Task::none()
+            }
+            Message::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers;
+                Task::none()
+            }
         }
+    }
+
+    /// Puts `text` on the clipboard.
+    fn copy(&mut self, text: String, spot: Spot) -> Task<Message> {
+        let copied = match &mut self.clipboard {
+            Some(clipboard) => clipboard.set_text(text),
+            None => {
+                return Task::batch([iced::clipboard::write(text), self.flash(spot, Done::Copied)]);
+            }
+        };
+        match copied {
+            Ok(()) => {
+                self.error = None;
+                self.flash(spot, Done::Copied)
+            }
+            Err(e) => {
+                self.error = Some(format!("Couldn't copy: {e}"));
+                Task::none()
+            }
+        }
+    }
+
+    /// Types `text` into the last focused Zellij pane; with `submit`, also
+    /// presses Enter.
+    fn send_to_zellij(&mut self, text: String, spot: Spot, submit: bool) -> Task<Message> {
+        if self.engine.deliver_write_chars(&text, submit) {
+            self.error = None;
+            return self.flash(spot, Done::Sent);
+        }
+        let Some(target) = self.engine.zellij_target() else {
+            self.error = Some(
+                "No Zellij session has reported to Hitch yet. Load the Hitch plugin in Zellij, \
+                 or focus a Zellij pane."
+                    .into(),
+            );
+            return Task::none();
+        };
+        Task::perform(
+            off_thread(move || zellij::Zellij::default().send(&target, &text, submit)),
+            move |result| Message::Sent {
+                spot,
+                result: result
+                    .unwrap_or_else(|| Err("Sending to Zellij failed.".into()))
+                    .map(drop),
+            },
+        )
+    }
+
+    /// Makes the button at `spot` say what it did, for a moment.
+    fn flash(&mut self, spot: Spot, done: Done) -> Task<Message> {
+        self.flash = Some((spot, done));
+        self.flash_count += 1;
+        let count = self.flash_count;
+        Task::perform(off_thread(|| std::thread::sleep(FLASH)), move |_| {
+            Message::FlashOver(count)
+        })
+    }
+
+    /// The code block with panel-wide number `number` (from 0): its text,
+    /// and where its buttons are.
+    fn code_block(&self, number: usize) -> Option<(String, Spot)> {
+        for (gi, group) in self.groups.iter().enumerate() {
+            for (ni, shown) in group.notes.iter().enumerate() {
+                let Some(index) = number.checked_sub(shown.first_code_block) else {
+                    continue;
+                };
+                if let Some(code) = note_view::code_blocks(shown.preview.items()).get(index) {
+                    let target = TaskTarget::Note {
+                        group: gi,
+                        note: ni,
+                    };
+                    return Some((note_view::block_text(code), Spot::Block { target, index }));
+                }
+            }
+        }
+        None
     }
 
     fn command(&mut self, command: Command) -> Task<Message> {
@@ -415,6 +562,14 @@ impl Panel {
                 self.commit_edit();
                 iced::exit()
             }
+            Shortcut::CopyBlock(number) => match self.code_block(number) {
+                Some((text, spot)) => self.copy(text, spot),
+                None => Task::none(),
+            },
+            Shortcut::SendBlock(number) => match self.code_block(number) {
+                Some((text, spot)) if self.can_send => self.send_to_zellij(text, spot, false),
+                _ => Task::none(),
+            },
         }
     }
 
@@ -523,6 +678,7 @@ impl Panel {
 
     /// Re-reads the notes for the active contexts.
     fn reload(&mut self) {
+        self.can_send = self.engine.zellij_target().is_some();
         self.choices = hitch_targets(&self.contexts.contexts)
             .into_iter()
             .map(|context| Choice {
@@ -873,18 +1029,33 @@ impl Panel {
             return self.editor_view(settings);
         }
 
-        let title = row![
-            text(&shown.note.title).size(15).font(BOLD).width(Fill),
+        let spot = Spot::Note { group, note };
+        let copied = self.flash == Some((spot, Done::Copied));
+        let mut title =
+            row![text(&shown.note.title).size(15).font(BOLD).width(Fill)].align_y(iced::Center);
+        if !shown.note.body.trim().is_empty() {
+            title = title.push(hint(
+                button(text(if copied { "Copied" } else { "Copy" }).size(12))
+                    .style(button::text)
+                    .padding([2, 6])
+                    .on_press(Message::Copy {
+                        text: shown.note.body.clone(),
+                        spot,
+                    }),
+                "Copy the note's text".into(),
+            ));
+        }
+        title = title.push(
             button(text("Edit").size(12))
                 .style(button::text)
                 .padding([2, 6])
                 .on_press(Message::Edit { group, note }),
-        ]
-        .align_y(iced::Center);
+        );
 
         let mut card = column![title].spacing(6);
         if !shown.note.body.trim().is_empty() {
-            let viewer = NoteViewer::new(TaskTarget::Note { group, note }, shown.first_code_block);
+            let viewer = NoteViewer::new(TaskTarget::Note { group, note }, shown.first_code_block)
+                .buttons(self.can_send, self.flash);
             card = card.push(viewer.view(shown.preview.items(), settings));
         }
         card.into()
@@ -902,7 +1073,9 @@ impl Panel {
             .min_height(120)
             .max_height(280);
 
-        let preview = NoteViewer::new(TaskTarget::Editor, 0).view(editor.preview.items(), settings);
+        let preview = NoteViewer::new(TaskTarget::Editor, 0)
+            .buttons(self.can_send, self.flash)
+            .view(editor.preview.items(), settings);
 
         let mut actions = row![
             button(text("Save").size(12))
@@ -956,6 +1129,18 @@ impl Panel {
 }
 
 const EDITOR_ID: &str = "hitch-note-editor";
+
+/// Runs `f` on its own thread, for work that blocks (running `zellij`,
+/// waiting). `None` if it panicked.
+fn off_thread<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+) -> impl std::future::Future<Output = Option<T>> {
+    let (tx, rx) = iced::futures::channel::oneshot::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    async move { rx.await.ok() }
+}
 
 fn hint<'a>(content: impl Into<Element<'a, Message>>, tip: String) -> Element<'a, Message> {
     tooltip(
@@ -1015,10 +1200,23 @@ fn dock_left(_window: Size, _monitor: Size) -> Point {
     Point::new(DOCK_MARGIN, DOCK_MARGIN)
 }
 
-fn on_event(event: Event, _status: event::Status, id: window::Id) -> Option<Message> {
+fn on_event(event: Event, status: event::Status, id: window::Id) -> Option<Message> {
     match event {
-        Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
-            shortcut(key.as_ref(), modifiers).map(Message::Shortcut)
+        Event::Keyboard(keyboard::Event::KeyPressed {
+            key,
+            physical_key,
+            modifiers,
+            ..
+        }) => shortcut(key.as_ref(), modifiers)
+            // Digits typed into the editor are the editor's.
+            .or_else(|| {
+                (status == event::Status::Ignored)
+                    .then(|| block_shortcut(physical_key, modifiers))
+                    .flatten()
+            })
+            .map(Message::Shortcut),
+        Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
+            Some(Message::ModifiersChanged(modifiers))
         }
         Event::Window(event) => {
             let event = match event {
@@ -1051,6 +1249,37 @@ fn shortcut(key: Key<&str>, modifiers: Modifiers) -> Option<Shortcut> {
         }
         _ => None,
     }
+}
+
+/// 1 to 9 copy a code block and Shift+1 to 9 send it. Matched by the
+/// physical key, so it works whatever the keyboard layout puts there.
+fn block_shortcut(key: key::Physical, modifiers: Modifiers) -> Option<Shortcut> {
+    use key::Code;
+    if modifiers.command() || modifiers.control() || modifiers.alt() || modifiers.logo() {
+        return None;
+    }
+    let key::Physical::Code(code) = key else {
+        return None;
+    };
+    let digits = [
+        (Code::Digit1, Code::Numpad1),
+        (Code::Digit2, Code::Numpad2),
+        (Code::Digit3, Code::Numpad3),
+        (Code::Digit4, Code::Numpad4),
+        (Code::Digit5, Code::Numpad5),
+        (Code::Digit6, Code::Numpad6),
+        (Code::Digit7, Code::Numpad7),
+        (Code::Digit8, Code::Numpad8),
+        (Code::Digit9, Code::Numpad9),
+    ];
+    let number = digits
+        .iter()
+        .position(|(digit, numpad)| code == *digit || code == *numpad)?;
+    Some(if modifiers.shift() {
+        Shortcut::SendBlock(number)
+    } else {
+        Shortcut::CopyBlock(number)
+    })
 }
 
 /// Opens a link from a note in the default browser or mail app. Only web
@@ -1117,6 +1346,31 @@ mod tests {
         // Plain typing and Ctrl+P (no Shift) are left to the editor.
         assert_eq!(shortcut(Key::Character("p"), Modifiers::SHIFT), None);
         assert_eq!(shortcut(Key::Character("p"), ctrl()), None);
+    }
+
+    #[test]
+    fn number_keys_copy_and_send_code_blocks() {
+        use key::{Code, Physical};
+        let none = Modifiers::empty();
+        assert_eq!(
+            block_shortcut(Physical::Code(Code::Digit1), none),
+            Some(Shortcut::CopyBlock(0))
+        );
+        assert_eq!(
+            block_shortcut(Physical::Code(Code::Numpad9), none),
+            Some(Shortcut::CopyBlock(8))
+        );
+        assert_eq!(
+            block_shortcut(Physical::Code(Code::Digit3), Modifiers::SHIFT),
+            Some(Shortcut::SendBlock(2))
+        );
+        assert_eq!(block_shortcut(Physical::Code(Code::Digit0), none), None);
+        assert_eq!(block_shortcut(Physical::Code(Code::Digit1), ctrl()), None);
+        assert_eq!(
+            block_shortcut(Physical::Code(Code::Digit1), Modifiers::ALT),
+            None
+        );
+        assert_eq!(block_shortcut(Physical::Code(Code::KeyA), none), None);
     }
 
     #[test]

@@ -19,6 +19,11 @@ iced = { workspace = true, features = ["markdown"] }
 # Same version iced's markdown widget parses with, so task checkboxes in the
 # preview map onto the same `- [ ]` markers in the source.
 pulldown-cmark = { version = "0.12", default-features = false }
+# The clipboard. iced's own clipboard belongs to the panel window, and on
+# Linux what was copied is lost when that window closes, which an unpinned
+# panel does as soon as it loses focus. arboard's clipboard lives as long as
+# Hitch does.
+arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
 serde.workspace = true
 serde_json.workspace = true
 

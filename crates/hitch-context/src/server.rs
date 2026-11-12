@@ -34,6 +34,10 @@ struct Conn {
 #[derive(Clone, Default)]
 pub(crate) struct Clients {
     conns: Arc<Mutex<HashMap<u64, Conn>>>,
+    /// Source sessions (the Zellij session) whose reports came with a
+    /// `hello`, and that hello's capabilities. Kept after the connection
+    /// closes: the Zellij plugin reports on one-shot connections.
+    sessions: Arc<Mutex<HashMap<String, Vec<String>>>>,
 }
 
 impl Clients {
@@ -66,6 +70,15 @@ impl Clients {
             conns.remove(&id);
         }
         false
+    }
+
+    /// Whether the client reporting `session` said it has `capability`.
+    pub(crate) fn session_has(&self, session: &str, capability: &str) -> bool {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(session)
+            .is_some_and(|caps| caps.iter().any(|c| c == capability))
     }
 
     fn shutdown_all(&self) {
@@ -173,6 +186,10 @@ fn accept_loop(listener: UnixListener, stop: Arc<AtomicBool>, clients: Clients, 
     }
 }
 
+/// Reads one connection's messages until it closes. Replies are best
+/// effort: a one-shot client (`hitch send`, the Zellij plugin) closes as
+/// soon as it has written, so the welcome to its `hello` can't be
+/// delivered, and the messages after the hello must still be read.
 fn serve(id: u64, stream: UnixStream, clients: &Clients, sink: &InputSink) -> io::Result<()> {
     stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
     let mut writer = stream.try_clone()?;
@@ -187,11 +204,11 @@ fn serve(id: u64, stream: UnixStream, clients: &Clients, sink: &InputSink) -> io
             return Ok(());
         }
         if buf.last() != Some(&b'\n') && n == MAX_LINE_BYTES {
-            reply(clients, &mut writer, &error("line too long"))?;
+            let _ = reply(clients, &mut writer, &error("line too long"));
             return Ok(());
         }
         let Ok(line) = std::str::from_utf8(&buf) else {
-            reply(clients, &mut writer, &error("invalid UTF-8"))?;
+            let _ = reply(clients, &mut writer, &error("invalid UTF-8"));
             continue;
         };
         if line.trim().is_empty() {
@@ -200,11 +217,11 @@ fn serve(id: u64, stream: UnixStream, clients: &Clients, sink: &InputSink) -> io
         let msg = match frame::decode::<ClientMessage>(line) {
             Ok(m) => m,
             Err(e) => {
-                reply(
+                let _ = reply(
                     clients,
                     &mut writer,
                     &error(&format!("invalid message: {e}")),
-                )?;
+                );
                 continue;
             }
         };
@@ -215,11 +232,11 @@ fn serve(id: u64, stream: UnixStream, clients: &Clients, sink: &InputSink) -> io
                 ..
             } => {
                 if protocol != PROTOCOL_VERSION {
-                    reply(
+                    let _ = reply(
                         clients,
                         &mut writer,
                         &error(&format!("unsupported protocol {protocol}")),
-                    )?;
+                    );
                     continue;
                 }
                 clients.lock().insert(
@@ -231,19 +248,29 @@ fn serve(id: u64, stream: UnixStream, clients: &Clients, sink: &InputSink) -> io
                         last_active: Instant::now(),
                     },
                 );
-                reply(
+                let _ = reply(
                     clients,
                     &mut writer,
                     &ServerMessage::Welcome {
                         protocol: PROTOCOL_VERSION,
                         version: env!("CARGO_PKG_VERSION").into(),
                     },
-                )?;
+                );
             }
             ClientMessage::Context(ref r) => {
-                if let Some(c) = clients.lock().get_mut(&id) {
+                let capabilities = clients.lock().get_mut(&id).map(|c| {
                     c.sources.insert(r.source.clone());
                     c.last_active = Instant::now();
+                    c.capabilities.clone()
+                });
+                if let Some(session) = &r.session {
+                    // A report without a hello forgets what the session
+                    // could do: its plugin may have been unloaded.
+                    clients
+                        .sessions
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(session.clone(), capabilities.unwrap_or_default());
                 }
                 sink.message(msg);
             }
