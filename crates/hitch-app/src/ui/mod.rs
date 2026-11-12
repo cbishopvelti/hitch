@@ -13,7 +13,9 @@
 //!   loses focus. On X11 and macOS the window level does this; on Wayland
 //!   only the shell can, so the context engine asks the GNOME extension
 //!   (`SetKeepAbove`, see docs/PROTOCOL.md).
-//! - **Notes**: each note is an H2 section. "Edit" opens it as Markdown with
+//! - **Notes**: read from and written to the HITCH.md files through
+//!   `hitch-store`, and re-read when a shown file changes on disk. Each
+//!   note is an H2 section. "Edit" opens it as Markdown with
 //!   a live preview; Esc or Ctrl+S saves. "+ Note" (or `hitch capture`,
 //!   Ctrl+Shift+H) starts a new note hitched to the most specific context,
 //!   with a dropdown to pick another. Task checkboxes toggle in place.
@@ -40,7 +42,7 @@ use iced::{
     Element, Event, Fill, Font, Point, Size, Subscription, Task, Theme, event, font, system, theme,
 };
 
-use backend::{Engine, NoteGroup, Store};
+use backend::{Engine, NoteGroup, Store, Watcher};
 use note_view::{NoteViewer, TaskTarget};
 use panel_state::{Edge, PanelState};
 
@@ -72,10 +74,14 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         Err(e) => return Err(format!("can't start the context engine: {e}").into()),
     };
+    let store = Store::for_user().ok_or("HOME is not set")?;
     // iced asks for a boot function it may call more than once; the engine
-    // is handed over on the first call.
-    let engine = std::cell::Cell::new(Some(engine));
-    let boot = move || Panel::boot(engine.take().expect("Hitch boots once"));
+    // and store are handed over on the first call.
+    let parts = std::cell::Cell::new(Some((engine, store)));
+    let boot = move || {
+        let (engine, store) = parts.take().expect("Hitch boots once");
+        Panel::boot(engine, store)
+    };
     iced::daemon(boot, Panel::update, Panel::view)
         .title(Panel::title)
         .theme(Panel::theme)
@@ -91,6 +97,7 @@ struct Panel {
     state_path: Option<PathBuf>,
     engine: Engine,
     store: Store,
+    watcher: Watcher,
     contexts: ActiveContexts,
     groups: Vec<Group>,
     /// Where a new note can be hitched, most specific first.
@@ -181,6 +188,8 @@ enum Target {
 pub enum Message {
     Engine(backend::Event),
     Dismiss(Notice),
+    /// A watched notes file changed on disk.
+    NotesChanged,
     Window(window::Id, WindowEvent),
     Shortcut(Shortcut),
     ThemeChanged(theme::Mode),
@@ -232,7 +241,7 @@ pub enum Shortcut {
 }
 
 impl Panel {
-    fn boot(engine: Engine) -> (Self, Task<Message>) {
+    fn boot(engine: Engine, store: Store) -> (Self, Task<Message>) {
         let state_path = PanelState::default_path();
         let state = state_path
             .as_deref()
@@ -244,7 +253,8 @@ impl Panel {
             state_path,
             contexts: engine.current(),
             engine,
-            store: Store::for_user(),
+            watcher: Watcher::new(store.config()),
+            store,
             groups: Vec::new(),
             choices: Vec::new(),
             editor: None,
@@ -277,6 +287,7 @@ impl Panel {
     fn subscription(&self) -> Subscription<Message> {
         Subscription::batch([
             self.engine.subscription().map(Message::Engine),
+            self.watcher.subscription().map(|_| Message::NotesChanged),
             event::listen_with(on_event),
             system::theme_changes().map(Message::ThemeChanged),
         ])
@@ -306,6 +317,11 @@ impl Panel {
                 Task::none()
             }
             Message::Engine(_) => Task::none(),
+            // Only the shown notes files are watched, so any change is ours.
+            Message::NotesChanged => {
+                self.reload();
+                Task::none()
+            }
             Message::Dismiss(notice) => {
                 self.notices.retain(|n| *n != notice);
                 Task::none()
@@ -507,19 +523,19 @@ impl Panel {
 
     /// Re-reads the notes for the active contexts.
     fn reload(&mut self) {
-        self.choices = self
-            .contexts
-            .contexts
-            .iter()
+        self.choices = hitch_targets(&self.contexts.contexts)
+            .into_iter()
             .map(|context| Choice {
-                path: self.store.notes_path(context),
-                label: match context {
+                path: self.store.notes_path(&context),
+                label: match &context {
                     Context::Folder { path } => label::tilde(path),
                     other => label::context(other),
                 },
-                context: context.clone(),
+                context,
             })
             .collect();
+        self.watcher
+            .watch_only(self.choices.iter().map(|c| c.path.clone()));
 
         let groups = match self.store.notes_for_all(&self.contexts.contexts) {
             Ok(groups) => groups,
@@ -626,13 +642,7 @@ impl Panel {
                 }
             }
             (Target::New { choice }, Some((title, body))) => {
-                // TODO(store): tag the note with the file for a File context
-                // (spec, matching rule 4) once Note carries its files.
-                let note = Note {
-                    title,
-                    body,
-                    ..Default::default()
-                };
+                let note = new_note(&choice.context, title, body);
                 self.store.save_note(&choice.path, note).map(drop)
             }
         };
@@ -958,6 +968,38 @@ fn hint<'a>(content: impl Into<Element<'a, Message>>, tip: String) -> Element<'a
     .into()
 }
 
+/// Where a new note can go: the active contexts, most specific first, with
+/// each file's project folder right after it, so making a note
+/// project-wide is one pick away (spec, matching rule 4).
+fn hitch_targets(contexts: &[Context]) -> Vec<Context> {
+    let mut targets: Vec<Context> = Vec::new();
+    for context in contexts {
+        let project = match context {
+            Context::File { project, .. } => Some(Context::Folder {
+                path: project.clone(),
+            }),
+            _ => None,
+        };
+        for target in std::iter::once(context.clone()).chain(project) {
+            if !targets.contains(&target) {
+                targets.push(target);
+            }
+        }
+    }
+    targets
+}
+
+/// A new note for `context`. For a file it is hitched to that file (spec,
+/// matching rule 4); picking the project folder instead makes it
+/// project-wide.
+fn new_note(context: &Context, title: String, body: String) -> Note {
+    let mut note = Note::new(title, body);
+    if let Context::File { file, .. } = context {
+        note.files = vec![file.clone()];
+    }
+    note
+}
+
 fn is_wayland() -> bool {
     cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some_and(|d| !d.is_empty())
 }
@@ -1075,6 +1117,39 @@ mod tests {
         // Plain typing and Ctrl+P (no Shift) are left to the editor.
         assert_eq!(shortcut(Key::Character("p"), Modifiers::SHIFT), None);
         assert_eq!(shortcut(Key::Character("p"), ctrl()), None);
+    }
+
+    #[test]
+    fn new_notes_are_hitched_to_the_current_file() {
+        let file = Context::File {
+            project: "/p".into(),
+            file: "src/a.rs".into(),
+        };
+        let note = new_note(&file, "T".into(), "B".into());
+        assert_eq!(note.files, vec![PathBuf::from("src/a.rs")]);
+        assert!(note.id.is_none());
+
+        let folder = Context::Folder { path: "/p".into() };
+        assert!(new_note(&folder, "T".into(), "B".into()).is_project_wide());
+    }
+
+    #[test]
+    fn a_file_offers_its_project_folder_next() {
+        let file = Context::File {
+            project: "/p".into(),
+            file: "a.rs".into(),
+        };
+        let folder = Context::Folder { path: "/p".into() };
+        let parent = Context::Folder { path: "/".into() };
+        assert_eq!(
+            hitch_targets(&[file.clone(), parent.clone()]),
+            vec![file.clone(), folder.clone(), parent.clone()]
+        );
+        // No duplicate when the engine already reports the folder.
+        assert_eq!(
+            hitch_targets(&[file.clone(), folder.clone()]),
+            vec![file, folder]
+        );
     }
 
     #[test]
