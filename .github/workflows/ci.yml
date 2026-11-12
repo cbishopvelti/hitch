@@ -42,6 +42,29 @@ jobs:
       - run: cargo build --workspace --all-targets
       - run: cargo test --workspace
 
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # Includes hitch-macos's on_a_mac test, which runs the focus watcher on
+      # the runner's desktop session.
+      - run: cargo test --workspace --no-fail-fast
+        env:
+          RUST_BACKTRACE: 1
+      - name: Build Hitch.app
+        run: packaging/macos/build-app.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Hitch-macos-arm64
+          path: target/release/Hitch-macos.zip
+
   protocol-wasm:
     name: hitch-protocol (wasm32-wasip1)
     runs-on: ubuntu-latest

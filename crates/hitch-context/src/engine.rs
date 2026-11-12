@@ -33,6 +33,14 @@ pub enum Event {
     /// [`hitch_protocol::zed::RECOMMENDED_SETTINGS`] to Zed's settings. Sent at
     /// most once per run.
     ZedNeedsTitleSetting,
+    /// macOS: whether Hitch has the Accessibility permission, which window
+    /// titles and files need (without it only the frontmost app is known).
+    /// Sent at start and when it changes; onboarding explains it and opens
+    /// System Settings ([`crate::permissions`]).
+    Accessibility { trusted: bool },
+    /// A global shortcut from [`Config::global_shortcuts`] couldn't be
+    /// registered, usually because another app holds it.
+    ShortcutUnavailable { keys: String },
 }
 
 /// Engine settings.
@@ -52,7 +60,25 @@ pub struct Config {
     pub gnome_shell: bool,
     /// D-Bus address to use instead of the session bus (tests).
     pub dbus_address: Option<String>,
+    /// Watch the frontmost app and window with NSWorkspace and the
+    /// Accessibility API. macOS only.
+    pub macos_focus: bool,
+    /// Ask macOS for the Accessibility permission at start if Hitch doesn't
+    /// have it (macOS shows its prompt once per app). The onboarding screen
+    /// can turn this off and ask with [`crate::permissions`] itself.
+    pub request_accessibility: bool,
+    /// Global shortcuts and the command each sends, like `hitch toggle`.
+    /// macOS only: on GNOME a custom shortcut runs the CLI instead.
+    pub global_shortcuts: Vec<(String, Command)>,
 }
+
+/// The default global shortcuts on macOS (spec, UX). The pin shortcut
+/// (Cmd+Shift+P) is left to the panel: globally it would take Zed's and
+/// other editors' command palette.
+pub const MACOS_SHORTCUTS: [(&str, Command); 2] = [
+    ("Cmd+Shift+N", Command::TogglePanel),
+    ("Cmd+Shift+H", Command::Capture),
+];
 
 impl Default for Config {
     fn default() -> Self {
@@ -65,6 +91,16 @@ impl Default for Config {
             notes_file_name: hitch_store::NOTES_FILE_NAME.to_owned(),
             gnome_shell: cfg!(target_os = "linux"),
             dbus_address: None,
+            macos_focus: cfg!(target_os = "macos"),
+            request_accessibility: cfg!(target_os = "macos"),
+            global_shortcuts: if cfg!(target_os = "macos") {
+                MACOS_SHORTCUTS
+                    .iter()
+                    .map(|(keys, command)| (keys.to_string(), *command))
+                    .collect()
+            } else {
+                Vec::new()
+            },
         }
     }
 }
@@ -73,7 +109,12 @@ pub(crate) enum Input {
     Message(ClientMessage),
     Window(WindowFocus),
     WindowGone,
+    #[cfg(target_os = "linux")]
     Shell(bool),
+    #[cfg(target_os = "macos")]
+    Accessibility(bool),
+    #[cfg(target_os = "macos")]
+    ShortcutUnavailable(String),
     SetIgnore(IgnoreList),
     Stop,
 }
@@ -81,7 +122,7 @@ pub(crate) enum Input {
 /// Feeds the engine. Cheap to clone and send to another thread.
 ///
 /// This is how a focus source plugs in: the socket server, the GNOME Shell
-/// watcher, the clawswap client and later macOS detection all push into one
+/// watcher, macOS detection and the clawswap client all push into one
 /// of these. A plugin-like source sends [`ClientMessage::Context`] and
 /// [`ClientMessage::Blur`] exactly as it would over the socket; an OS focus
 /// source sends [`InputSink::window_focus`].
@@ -106,8 +147,19 @@ impl InputSink {
         let _ = self.tx.send(Input::WindowGone);
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn shell_available(&self, available: bool) {
         let _ = self.tx.send(Input::Shell(available));
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn accessibility(&self, trusted: bool) {
+        let _ = self.tx.send(Input::Accessibility(trusted));
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn shortcut_unavailable(&self, keys: String) {
+        let _ = self.tx.send(Input::ShortcutUnavailable(keys));
     }
 }
 
@@ -119,6 +171,8 @@ struct Inner {
     socket_path: PathBuf,
     #[cfg(target_os = "linux")]
     shell: Option<crate::gnome::Shell>,
+    #[cfg(target_os = "macos")]
+    _mac: crate::macos::Mac,
 }
 
 impl Drop for Inner {
@@ -143,7 +197,8 @@ impl std::fmt::Debug for Engine {
 }
 
 impl Engine {
-    /// Start listening on the socket, watch the GNOME Shell extension, and
+    /// Start listening on the socket, watch the GNOME Shell extension (Linux)
+    /// or the frontmost app (macOS), register global shortcuts (macOS), and
     /// call `on_event` (on the engine's own thread) as things change.
     ///
     /// Fails if the socket can't be bound, for example with `AddrInUse`
@@ -192,6 +247,14 @@ impl Engine {
             None
         };
 
+        #[cfg(target_os = "macos")]
+        let mac = crate::macos::Mac::start(
+            &sink,
+            config.macos_focus,
+            config.request_accessibility,
+            &config.global_shortcuts,
+        );
+
         Ok(Self {
             inner: Arc::new(Inner {
                 sink,
@@ -201,6 +264,8 @@ impl Engine {
                 socket_path,
                 #[cfg(target_os = "linux")]
                 shell,
+                #[cfg(target_os = "macos")]
+                _mac: mac,
             }),
         })
     }
@@ -242,22 +307,34 @@ impl Engine {
         let _ = self.inner.sink.tx.send(Input::SetIgnore(ignore));
     }
 
-    /// Pin or unpin: ask the GNOME Shell extension to keep Hitch's windows
-    /// above others on every workspace. The pin holds while this engine
-    /// lives, and is applied again if the extension restarts (screen lock).
-    /// Fails with `Unsupported` when there is no session bus, and with an
-    /// error from the call when the extension isn't on the bus (the pin is
-    /// still applied once it appears).
+    /// Pin or unpin: keep Hitch's windows above others on every workspace.
+    ///
+    /// On Linux this asks the GNOME Shell extension. The pin holds while
+    /// this engine lives, and is applied again if the extension restarts
+    /// (screen lock). Fails with `Unsupported` when there is no session bus,
+    /// and with an error from the call when the extension isn't on the bus
+    /// (the pin is still applied once it appears).
+    ///
+    /// On macOS Hitch does it itself: its windows float and join every
+    /// Space, including those opened later. Always succeeds.
     pub fn set_keep_above(&self, pinned: bool) -> io::Result<()> {
-        #[cfg(target_os = "linux")]
-        if let Some(shell) = &self.inner.shell {
-            return shell.set_keep_above(pinned).map_err(io::Error::other);
+        #[cfg(target_os = "macos")]
+        {
+            hitch_macos::set_keep_above(pinned);
+            Ok(())
         }
-        let _ = pinned;
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "the Hitch GNOME Shell extension is not available",
-        ))
+        #[cfg(not(target_os = "macos"))]
+        {
+            #[cfg(target_os = "linux")]
+            if let Some(shell) = &self.inner.shell {
+                return shell.set_keep_above(pinned).map_err(io::Error::other);
+            }
+            let _ = pinned;
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "the Hitch GNOME Shell extension is not available",
+            ))
+        }
     }
 
     /// The socket this engine listens on.
@@ -346,8 +423,19 @@ impl LoopState {
                 self.resolver.clear_window();
                 true
             }
+            #[cfg(target_os = "linux")]
             Input::Shell(available) => {
                 on_event(Event::ShellExtension { available });
+                false
+            }
+            #[cfg(target_os = "macos")]
+            Input::Accessibility(trusted) => {
+                on_event(Event::Accessibility { trusted });
+                false
+            }
+            #[cfg(target_os = "macos")]
+            Input::ShortcutUnavailable(keys) => {
+                on_event(Event::ShortcutUnavailable { keys });
                 false
             }
             Input::SetIgnore(ignore) => {

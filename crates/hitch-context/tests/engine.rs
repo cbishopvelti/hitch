@@ -43,6 +43,10 @@ fn start(sock: &Path, dbus: Option<String>) -> (Engine, mpsc::Receiver<Event>) {
             debounce: Duration::from_millis(20),
             gnome_shell: dbus.is_some(),
             dbus_address: dbus,
+            // No prompts or global shortcuts from a test run on macOS.
+            macos_focus: false,
+            request_accessibility: false,
+            global_shortcuts: Vec::new(),
             ..Default::default()
         },
         move |e| {
@@ -54,6 +58,7 @@ fn start(sock: &Path, dbus: Option<String>) -> (Engine, mpsc::Receiver<Event>) {
 }
 
 /// The next event that `pick` accepts, skipping others.
+#[track_caller]
 fn next<T>(rx: &mpsc::Receiver<Event>, pick: impl Fn(Event) -> Option<T>) -> T {
     let deadline = std::time::Instant::now() + WAIT;
     loop {
@@ -65,6 +70,7 @@ fn next<T>(rx: &mpsc::Receiver<Event>, pick: impl Fn(Event) -> Option<T>) -> T {
     }
 }
 
+#[track_caller]
 fn contexts(rx: &mpsc::Receiver<Event>) -> Vec<Context> {
     next(rx, |e| match e {
         Event::Contexts(c) => Some(c.contexts),
@@ -116,6 +122,9 @@ fn socket_round_trip() {
         Config {
             socket_path: Some(sock.clone()),
             gnome_shell: false,
+            macos_focus: false,
+            request_accessibility: false,
+            global_shortcuts: Vec::new(),
             ..Default::default()
         },
         |_| {},

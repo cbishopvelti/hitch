@@ -596,6 +596,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossbeam-channel"
+version = "0.5.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98b0cc327b5bc766e7fda9c9260cc0fa81b43a8e240440422dff70788e3f9ef1"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "crossbeam-utils"
 version = "0.8.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -648,6 +657,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e0e367e4e7da84520dedcac1901e4da967309406d1e51017ae1abfb97adbd38"
 dependencies = [
  "bitflags 2.13.2",
+ "block2 0.6.2",
+ "libc",
  "objc2 0.6.5",
 ]
 
@@ -1046,6 +1057,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "151665d9be52f9bb40fc7966565d39666f2d1e69233571b71b87791c7e0528b3"
 
 [[package]]
+name = "global-hotkey"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96daa86bdc1413406daee362a835e52c430c2193e5a5c328d1e522be140d1764"
+dependencies = [
+ "crossbeam-channel",
+ "keyboard-types",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "once_cell",
+ "thiserror 2.0.21",
+ "windows-sys 0.59.0",
+ "x11rb",
+ "xkeysym",
+]
+
+[[package]]
 name = "glow"
 version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1224,11 +1252,27 @@ dependencies = [
 name = "hitch-context"
 version = "0.1.0"
 dependencies = [
+ "hitch-macos",
  "hitch-protocol",
  "hitch-store",
  "serde",
  "serde_json",
  "zbus",
+]
+
+[[package]]
+name = "hitch-macos"
+version = "0.1.0"
+dependencies = [
+ "block2 0.6.2",
+ "dispatch2",
+ "global-hotkey",
+ "libc",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-application-services",
+ "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
 ]
 
 [[package]]
@@ -1550,6 +1594,16 @@ dependencies = [
  "cfg-if",
  "futures-util",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "keyboard-types"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fbe853b403ae61a04233030ae8a79d94975281ed9770a1f9e246732b534b28d"
+dependencies = [
+ "bitflags 2.13.2",
+ "serde",
 ]
 
 [[package]]
@@ -1977,6 +2031,17 @@ dependencies = [
  "objc2-core-video",
  "objc2-foundation 0.3.2",
  "objc2-quartz-core 0.3.2",
+]
+
+[[package]]
+name = "objc2-application-services"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69282c2b5bc58fba07cb9de2113619532eb551e98efe3d8d695509ef45fbd53b"
+dependencies = [
+ "bitflags 2.13.2",
+ "libc",
+ "objc2-core-foundation",
 ]
 
 [[package]]
