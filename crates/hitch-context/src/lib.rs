@@ -12,10 +12,25 @@
 //!
 //! Matching rule 3: when the frontmost app reports no file, the last file
 //! context stays current.
+//!
+//! The app starts an [`Engine`] and gets [`Event`]s from it. Each focus
+//! source pushes into an [`InputSink`]: the socket server, the
+//! GNOME Shell watcher ([`gnome`]), the [`clawswap`] client, and later macOS
+//! detection. The [`resolve::Resolver`] decides what is current.
 
 pub mod clawswap;
+mod engine;
+#[cfg(target_os = "linux")]
+pub mod gnome;
+pub mod project;
+pub mod resolve;
+mod server;
+pub mod title;
 
+pub use engine::{Config, Engine, Event, InputSink};
 pub use hitch_protocol::{Context, ContextReport, Source};
+pub use project::{FsProjectFinder, ProjectFinder};
+pub use resolve::{AppTable, IgnoreList, Resolver, WindowFocus};
 
 /// Debounce applied to context changes before the panel updates.
 pub const DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(300);
