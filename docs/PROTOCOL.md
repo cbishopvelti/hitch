@@ -116,7 +116,9 @@ Hitch ignores `FocusChanged` where `pid` is its own (the panel itself got focus)
 
 ## clawswap (HTTP)
 
-See the spec, "Architecture and platform", for the endpoints. Hitch reads `GET /projects` for each project's `root` and subscribes to `GET /focus/events` (Server-Sent Events, `{"project", "root", "at"}`) while the browser is frontmost, turning each event into a `context` with `source: "clawswap"` and `project_root: root`.
+See the spec, "Architecture and platform", for the endpoints. Hitch subscribes to `GET /focus/events` on `127.0.0.1:$CLAWSWAP_PORT` (27390 by default, as clawswap's own CLI does). Each Server-Sent Event's data is `{"project", "root", "at"}`, or `null` when no project's page has focus; the first arrives on connect, then one each time a page reports focus (the same project again included), with a `: beat` comment every 15 s. The request must use a loopback `Host` and send no `Origin`.
+
+The client is [`hitch_context::clawswap`](../crates/hitch-context/src/clawswap.rs). It turns each event into a `context` with `source: "clawswap"` and `project_root: root`, and `null` or the daemon going away into a `blur` for `clawswap`, so the engine handles it like a socket client. It reconnects with backoff (1 s to 30 s). The resolver applies clawswap's report only while the browser is frontmost. `GET /projects` is not needed, since each event carries its `root`.
 
 ## Zed (window title)
 

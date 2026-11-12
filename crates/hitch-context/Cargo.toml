@@ -10,6 +10,8 @@ publish = false
 [dependencies]
 hitch-protocol.workspace = true
 hitch-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true
