@@ -59,7 +59,7 @@ zellij --session hitch pipe --name hitch -- '{"type":"write_chars","text":"cargo
 zellij --session hitch pipe --name hitch -- '{"type":"write_chars","text":"cargo test","submit":true}'
 ```
 
-The pipe exits 0 when the text was typed, and 1 with a one-line reason when it wasn't.
+The pipe prints `typed` and exits 0 when the text was typed, and exits 1 with a one-line reason when it wasn't. With no plugin listening, `zellij pipe` exits 0 and prints nothing (its stdin closed) or waits forever (stdin open), so Hitch looks for `typed`.
 
 ## Notes
 

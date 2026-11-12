@@ -5,15 +5,16 @@
 //!
 //! - **Task lists**: checkboxes are clickable and toggle the matching
 //!   `- [ ]` marker in the note's source ([`toggle_task`]).
-//! - **Code blocks**: every block is numbered in panel order, the hook the
-//!   copy and send-to-Zellij buttons (and keys 1 to 9) build on.
-//!   [`code_blocks`] lists the same blocks, in the same order, as raw text.
+//! - **Code blocks**: every block is numbered in panel order and shows Copy
+//!   and Send to Zellij buttons on hover (spec F12, F13). Keys 1 to 9 use
+//!   the same numbers: [`code_blocks`] lists the same blocks, in the same
+//!   order, as raw text.
 
 use std::cell::Cell;
 use std::ops::Range;
 
 use iced::widget::markdown::{self, Bullet, Item, Settings, Uri, Viewer};
-use iced::widget::{checkbox, column, container, row, scrollable, text};
+use iced::widget::{button, checkbox, column, container, hover, row, scrollable, stack, text};
 use iced::{Element, Fill, Font, alignment};
 
 use super::Message;
@@ -99,6 +100,28 @@ pub fn code_blocks(items: &[Item]) -> Vec<String> {
     out
 }
 
+/// The text a code block's Copy and Send buttons hand over: the code
+/// without its fences or the newline that ends it.
+pub fn block_text(code: &str) -> String {
+    code.trim_end_matches(['\n', '\r']).to_string()
+}
+
+/// Where a Copy or Send button was pressed, so it can say "Copied".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Spot {
+    /// A code block: its place within the Markdown it belongs to.
+    Block { target: TaskTarget, index: usize },
+    /// A whole note's Copy button.
+    Note { group: usize, note: usize },
+}
+
+/// What a button briefly says it did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Done {
+    Copied,
+    Sent,
+}
+
 /// Which Markdown a task checkbox belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskTarget {
@@ -114,6 +137,11 @@ pub struct NoteViewer {
     /// Number of the first code block in this note, counting from 0 across
     /// the whole panel.
     first_code_block: usize,
+    /// A Zellij session is there to send code blocks to.
+    can_send: bool,
+    /// The block (by its index in this note) whose button just did
+    /// something.
+    flash: Option<(usize, Done)>,
     tasks: Cell<usize>,
     code_blocks: Cell<usize>,
 }
@@ -123,9 +151,24 @@ impl NoteViewer {
         Self {
             target,
             first_code_block,
+            can_send: false,
+            flash: None,
             tasks: Cell::new(0),
             code_blocks: Cell::new(0),
         }
+    }
+
+    /// Shows Send to Zellij buttons, and the button that just copied or
+    /// sent (`flash`, from the panel) saying so.
+    pub fn buttons(mut self, can_send: bool, flash: Option<(Spot, Done)>) -> Self {
+        self.can_send = can_send;
+        self.flash = match flash {
+            Some((Spot::Block { target, index }, done)) if target == self.target => {
+                Some((index, done))
+            }
+            _ => None,
+        };
+        self
     }
 
     /// Renders `items`. Use a fresh viewer for each render: it counts tasks
@@ -206,6 +249,54 @@ fn code_block<'a>(settings: Settings, code: &'a str) -> Element<'a, Message> {
     .into()
 }
 
+/// The Copy and Send to Zellij buttons, over a code block's top right.
+fn block_buttons<'a>(
+    code: &str,
+    spot: Spot,
+    key: Option<usize>,
+    can_send: bool,
+    flash: Option<Done>,
+) -> Element<'a, Message> {
+    let small = |label: &'static str| text(label).size(11);
+    let copy = button(small(if flash == Some(Done::Copied) {
+        "Copied"
+    } else {
+        "Copy"
+    }))
+    .padding([2, 6])
+    .style(button::secondary)
+    .on_press(Message::Copy {
+        text: code.to_string(),
+        spot,
+    });
+    let copy_tip = match key {
+        Some(n) => format!("Copy without the fences ({n})"),
+        None => "Copy without the fences".into(),
+    };
+    let mut bar = row![super::hint(copy, copy_tip)].spacing(4);
+    if can_send {
+        let send = button(small(if flash == Some(Done::Sent) {
+            "Sent"
+        } else {
+            "Send to Zellij"
+        }))
+        .padding([2, 6])
+        .style(button::secondary)
+        .on_press(Message::SendToZellij {
+            text: code.to_string(),
+            spot,
+        });
+        let send_tip = match key {
+            Some(n) => {
+                format!("Type it into the last Zellij pane (Shift+{n}). Shift+click runs it.")
+            }
+            None => "Type it into the last Zellij pane. Shift+click runs it.".into(),
+        };
+        bar = bar.push(super::hint(send, send_tip));
+    }
+    container(bar).align_right(Fill).padding(4).into()
+}
+
 fn bullet_items(bullet: &Bullet) -> &[Item] {
     match bullet {
         Bullet::Point { items } | Bullet::Task { items, .. } => items,
@@ -244,12 +335,29 @@ impl<'a> Viewer<'a, Message> for NoteViewer {
         code: &'a str,
         _lines: &'a [markdown::Text],
     ) -> Element<'a, Message> {
-        let number = self.first_code_block + self.code_blocks.get();
-        self.code_blocks.set(self.code_blocks.get() + 1);
-        // `number` is this block's place in the panel (0-based). The copy and
-        // send-to-Zellij buttons go here, next to the block.
-        let _ = number;
-        code_block(settings, code)
+        let index = self.code_blocks.get();
+        self.code_blocks.set(index + 1);
+        // Keys 1 to 9 reach the first nine blocks of the saved notes; the
+        // preview of a note being edited isn't numbered.
+        let key = match self.target {
+            TaskTarget::Note { .. } => Some(self.first_code_block + index + 1).filter(|n| *n <= 9),
+            TaskTarget::Editor => None,
+        };
+        let spot = Spot::Block {
+            target: self.target,
+            index,
+        };
+        let flash = self
+            .flash
+            .and_then(|(i, done)| (i == index).then_some(done));
+        let block = code_block(settings, code);
+        let buttons = block_buttons(&block_text(code), spot, key, self.can_send, flash);
+        if flash.is_some() {
+            // Keep "Copied" in view when a number key did it.
+            stack![block, buttons].into()
+        } else {
+            hover(block, buttons)
+        }
     }
 }
 

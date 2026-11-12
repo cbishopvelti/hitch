@@ -19,6 +19,8 @@ pub use hitch_store::{NoteGroup, Store};
 
 pub use hitch_context::Event;
 
+const WRITE_CHARS: &str = "write_chars";
+
 /// The context engine, plus the clawswap client feeding it, with its events
 /// bridged into an iced subscription.
 pub struct Engine {
@@ -58,6 +60,31 @@ impl Engine {
     /// connection does.
     pub fn set_keep_above(&self, pinned: bool) -> io::Result<()> {
         self.engine.set_keep_above(pinned)
+    }
+
+    /// The Zellij session to send code blocks to: the one that reported
+    /// last, so its last focused pane is the one the user just left.
+    pub fn zellij_target(&self) -> Option<super::zellij::Target> {
+        let session = self
+            .engine
+            .last_report(&hitch_protocol::Source::Zellij)?
+            .session?;
+        Some(super::zellij::Target {
+            has_plugin: self.engine.session_has_capability(&session, WRITE_CHARS),
+            session,
+        })
+    }
+
+    /// Hands `write_chars` to a Zellij plugin connected to the socket right
+    /// now, if there is one. Returns false if there isn't.
+    pub fn deliver_write_chars(&self, text: &str, submit: bool) -> bool {
+        self.engine.deliver(
+            WRITE_CHARS,
+            &hitch_protocol::ServerMessage::WriteChars {
+                text: text.to_string(),
+                submit,
+            },
+        )
     }
 
     /// The engine's events, as they happen.

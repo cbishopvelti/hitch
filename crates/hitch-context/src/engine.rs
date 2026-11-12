@@ -229,6 +229,14 @@ impl Engine {
         self.inner.server.clients().deliver(capability, msg)
     }
 
+    /// Whether the client that last reported `session` (a Zellij session)
+    /// said `hello` with `capability`. Hitch pipes `write_chars` only to
+    /// sessions whose plugin did: `zellij pipe` with no plugin listening
+    /// never returns (docs/PROTOCOL.md).
+    pub fn session_has_capability(&self, session: &str, capability: &str) -> bool {
+        self.inner.server.clients().session_has(session, capability)
+    }
+
     /// Replace the ignore list (spec F10).
     pub fn set_ignore(&self, ignore: IgnoreList) {
         let _ = self.inner.sink.tx.send(Input::SetIgnore(ignore));

@@ -148,6 +148,9 @@ fn socket_round_trip() {
             .and_then(|r| r.session),
         Some("main".into())
     );
+    assert!(engine.session_has_capability("main", "write_chars"));
+    assert!(!engine.session_has_capability("main", "something_else"));
+    assert!(!engine.session_has_capability("other", "write_chars"));
 
     // Garbage gets an error, and the connection stays usable.
     zellij.send("not json");
@@ -192,7 +195,51 @@ fn socket_round_trip() {
     assert!(!engine.deliver("write_chars", &msg));
     assert_eq!(
         engine.current().contexts,
-        vec![Context::Folder { path: proj }]
+        vec![Context::Folder { path: proj.clone() }]
+    );
+    // The plugin reports on one-shot connections, so its session keeps the
+    // capability after the connection closes...
+    assert!(engine.session_has_capability("main", "write_chars"));
+    // ...until a report for that session comes without a hello.
+    hitch_protocol::client::send_all(
+        &sock,
+        &[hitch_protocol::ClientMessage::Context(
+            hitch_protocol::ContextReport {
+                source: hitch_protocol::Source::Zellij,
+                cwd: Some(proj),
+                session: Some("main".into()),
+                ..Default::default()
+            },
+        )],
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(!engine.session_has_capability("main", "write_chars"));
+    // The plugin's report: hello and context on one connection that closes
+    // straight away, before Hitch's welcome can be written back.
+    hitch_protocol::client::send_all(
+        &sock,
+        &[
+            hitch_protocol::frame::decode(
+                r#"{"type":"hello","client":"hitch-zellij","version":"0","protocol":1,"capabilities":["write_chars"]}"#,
+            )
+            .unwrap(),
+            hitch_protocol::ClientMessage::Context(hitch_protocol::ContextReport {
+                source: hitch_protocol::Source::Zellij,
+                cwd: Some(t.dir("proj/docs")),
+                session: Some("main".into()),
+                ..Default::default()
+            }),
+        ],
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(engine.session_has_capability("main", "write_chars"));
+    assert_eq!(
+        engine
+            .last_report(&hitch_protocol::Source::Zellij)
+            .and_then(|r| r.cwd),
+        Some(t.0.join("proj/docs"))
     );
 
     drop(engine);
