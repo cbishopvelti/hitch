@@ -15,7 +15,12 @@ path = "src/main.rs"
 hitch-protocol.workspace = true
 hitch-store.workspace = true
 hitch-context.workspace = true
-iced.workspace = true
+iced = { workspace = true, features = ["markdown"] }
+# Same version iced's markdown widget parses with, so task checkboxes in the
+# preview map onto the same `- [ ]` markers in the source.
+pulldown-cmark = { version = "0.12", default-features = false }
+serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true
