@@ -4,7 +4,8 @@ Hitch learns context from three kinds of sources, each with its own channel:
 
 | Source | Channel | Direction |
 |---|---|---|
-| Zed extension, Zellij plugin, `hitch` CLI | Hitch socket (this document) | both ways |
+| Zellij plugin, `hitch` CLI | Hitch socket (this document) | both ways |
+| Zed | Window title, through the GNOME Shell extension | Hitch reads |
 | GNOME Shell extension | D-Bus, session bus | Hitch subscribes |
 | clawswap | HTTP + SSE on 127.0.0.1:27390 | Hitch subscribes |
 
@@ -116,3 +117,7 @@ Hitch ignores `FocusChanged` where `pid` is its own (the panel itself got focus)
 ## clawswap (HTTP)
 
 See the spec, "Architecture and platform", for the endpoints. Hitch reads `GET /projects` for each project's `root` and subscribes to `GET /focus/events` (Server-Sent Events, `{"project", "root", "at"}`) while the browser is frontmost, turning each event into a `context` with `source: "clawswap"` and `project_root: root`.
+
+## Zed (window title)
+
+Zed's extension API can't see the active file, so there is no Zed extension. Users set Zed's `window_title_format` to `${projectName}${separator}${filePath}` (Zed 1.20+), and the title of a focused `dev.zed.Zed*` window then ends with the active file's absolute path, e.g. `hitch — /home/u/code/hitch/src/main.rs`. Hitch parses `FocusChanged` titles with `hitch_protocol::zed::parse_window_title` and treats a title with a path as a `context` from `zed` with that `file`; focus moving to another app is Zed's `blur`. Details and what is still unverified: [`integrations/zed/README.md`](../integrations/zed/README.md).
