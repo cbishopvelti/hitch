@@ -13,6 +13,8 @@
 //! Matching rule 3: when the frontmost app reports no file, the last file
 //! context stays current.
 
+pub mod clawswap;
+
 pub use hitch_protocol::{Context, ContextReport, Source};
 
 /// Debounce applied to context changes before the panel updates.
