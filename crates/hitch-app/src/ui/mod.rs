@@ -61,12 +61,27 @@ const BOLD: Font = Font {
     ..Font::DEFAULT
 };
 
-pub fn run() -> iced::Result {
-    iced::daemon(Panel::boot, Panel::update, Panel::view)
+/// Starts Hitch: the context engine, then the panel. If Hitch is already
+/// running, shows its panel instead.
+pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let engine = match Engine::start() {
+        Ok(engine) => engine,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            crate::cli::execute(crate::cli::Invocation::Command(Command::ShowPanel))?;
+            return Ok(());
+        }
+        Err(e) => return Err(format!("can't start the context engine: {e}").into()),
+    };
+    // iced asks for a boot function it may call more than once; the engine
+    // is handed over on the first call.
+    let engine = std::cell::Cell::new(Some(engine));
+    let boot = move || Panel::boot(engine.take().expect("Hitch boots once"));
+    iced::daemon(boot, Panel::update, Panel::view)
         .title(Panel::title)
         .theme(Panel::theme)
         .subscription(Panel::subscription)
-        .run()
+        .run()?;
+    Ok(())
 }
 
 struct Panel {
@@ -85,6 +100,31 @@ struct Panel {
     /// The last thing that went wrong, shown under the notes until the next
     /// action succeeds.
     error: Option<String>,
+    /// Setup hints from the engine, until dismissed.
+    notices: Vec<Notice>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Notice {
+    /// The GNOME Shell extension isn't on the bus (Wayland).
+    NoShellExtension,
+    /// Zed's window title has no file path.
+    ZedTitleSetting,
+}
+
+impl Notice {
+    fn text(self) -> String {
+        match self {
+            Notice::NoShellExtension => "Hitch can't see which window has focus or keep the \
+                panel on top: the Hitch GNOME Shell extension isn't running."
+                .into(),
+            Notice::ZedTitleSetting => format!(
+                "Zed's window title doesn't show the file, so Hitch can't tell which file \
+                 is open. Add {} to ~/.config/zed/settings.json.",
+                hitch_protocol::zed::RECOMMENDED_SETTINGS
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -140,6 +180,7 @@ enum Target {
 #[derive(Debug, Clone)]
 pub enum Message {
     Engine(backend::Event),
+    Dismiss(Notice),
     Window(window::Id, WindowEvent),
     Shortcut(Shortcut),
     ThemeChanged(theme::Mode),
@@ -191,16 +232,12 @@ pub enum Shortcut {
 }
 
 impl Panel {
-    fn boot() -> (Self, Task<Message>) {
+    fn boot(engine: Engine) -> (Self, Task<Message>) {
         let state_path = PanelState::default_path();
         let state = state_path
             .as_deref()
             .map(PanelState::load)
             .unwrap_or_default();
-        let engine = Engine::start();
-        if state.pinned {
-            engine.set_keep_above(true);
-        }
         let mut panel = Self {
             window: None,
             state,
@@ -213,7 +250,11 @@ impl Panel {
             editor: None,
             mode: theme::Mode::None,
             error: None,
+            notices: Vec::new(),
         };
+        if panel.state.pinned {
+            panel.keep_above();
+        }
         let show = panel.show();
         (
             panel,
@@ -251,6 +292,24 @@ impl Panel {
                 Task::none()
             }
             Message::Engine(backend::Event::Command(command)) => self.command(command),
+            Message::Engine(backend::Event::ShellExtension { available }) => {
+                // Only GNOME on Wayland needs the extension.
+                if available || !is_wayland() {
+                    self.notices.retain(|n| *n != Notice::NoShellExtension);
+                } else {
+                    self.notice(Notice::NoShellExtension);
+                }
+                Task::none()
+            }
+            Message::Engine(backend::Event::ZedNeedsTitleSetting) => {
+                self.notice(Notice::ZedTitleSetting);
+                Task::none()
+            }
+            Message::Engine(_) => Task::none(),
+            Message::Dismiss(notice) => {
+                self.notices.retain(|n| *n != notice);
+                Task::none()
+            }
             Message::Window(id, event) => self.window_event(id, event),
             Message::Shortcut(shortcut) => self.shortcut(shortcut),
             Message::ThemeChanged(mode) => {
@@ -390,10 +449,29 @@ impl Panel {
         if let Some(path) = &self.state_path {
             self.report(self.state.save(path));
         }
-        self.engine.set_keep_above(self.state.pinned);
+        self.keep_above();
         match self.window {
             Some(window) => window::set_level(window.id, self.level()),
             None => Task::none(),
+        }
+    }
+
+    /// Pins or unpins through the GNOME extension. Only Wayland needs it; the
+    /// window level covers X11 and macOS.
+    fn keep_above(&mut self) {
+        if let Err(e) = self.engine.set_keep_above(self.state.pinned)
+            && self.state.pinned
+            && is_wayland()
+        {
+            self.error = Some(format!(
+                "Pinned, but the panel can't stay on top until the Hitch GNOME extension runs ({e})."
+            ));
+        }
+    }
+
+    fn notice(&mut self, notice: Notice) {
+        if !self.notices.contains(&notice) {
+            self.notices.push(notice);
         }
     }
 
@@ -646,6 +724,23 @@ impl Panel {
     fn view(&self, _window: window::Id) -> Element<'_, Message> {
         let notes = self.notes_view();
         let mut body = column![self.header(), rule::horizontal(1), notes];
+        for notice in &self.notices {
+            body = body.push(
+                container(
+                    row![
+                        text(notice.text()).size(12).width(Fill),
+                        button(text("Dismiss").size(11))
+                            .style(button::text)
+                            .on_press(Message::Dismiss(*notice)),
+                    ]
+                    .spacing(6)
+                    .align_y(iced::Center),
+                )
+                .padding([6, 12])
+                .width(Fill)
+                .style(container::secondary),
+            );
+        }
         if let Some(error) = &self.error {
             body = body.push(
                 container(text(error).size(12).style(text::danger))
@@ -861,6 +956,10 @@ fn hint<'a>(content: impl Into<Element<'a, Message>>, tip: String) -> Element<'a
         tooltip::Position::Bottom,
     )
     .into()
+}
+
+fn is_wayland() -> bool {
+    cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some_and(|d| !d.is_empty())
 }
 
 fn dock_right(window: Size, monitor: Size) -> Point {

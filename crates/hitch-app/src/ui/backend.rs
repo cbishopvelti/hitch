@@ -8,18 +8,21 @@
 //! - engine: `Event::Contexts` and `Event::Command` from a callback, `current`,
 //!   and `set_keep_above` for the pin on Wayland.
 //!
-//! Until those land, both are stubs: notes live in memory for the session
-//! and the only context is the folder Hitch was started in. Swapping in the
-//! real crates should only touch this file.
+//! The engine is real. The store is still a stub until `hitch-store`
+//! lands: notes live in memory for the session. Swapping it in should only
+//! touch this file.
 
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use hitch_context::ActiveContexts;
-use hitch_protocol::{Command, Context};
+use hitch_protocol::Context;
 use hitch_store::{NOTES_FILE_NAME, Note};
 use iced::Subscription;
+use iced::futures::channel::mpsc;
 
 /// The notes of one notes file, shown as one section of the panel.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,50 +109,73 @@ impl Store {
     }
 }
 
-/// What the context engine tells the panel.
-#[derive(Debug, Clone)]
-#[allow(dead_code)] // Only the real engine sends these; the stub never does.
-pub enum Event {
-    /// The active contexts changed (debounced, most specific first).
-    Contexts(ActiveContexts),
-    /// A command from `hitch toggle` and friends, or a global shortcut.
-    Command(Command),
-}
+pub use hitch_context::Event;
 
-/// Stub of `hitch_context::Engine`.
-#[derive(Debug, Default)]
+/// The context engine, plus the clawswap client feeding it, with its events
+/// bridged into an iced subscription.
 pub struct Engine {
-    start_dir: Option<PathBuf>,
+    engine: hitch_context::Engine,
+    events: Events,
+    _clawswap: hitch_context::clawswap::ClawswapHandle,
 }
 
 impl Engine {
-    pub fn start() -> Self {
-        Self {
-            start_dir: std::env::current_dir().ok(),
-        }
+    /// Starts the engine and its socket. Fails with `AddrInUse` when another
+    /// Hitch is already running.
+    pub fn start() -> io::Result<Self> {
+        let (tx, rx) = mpsc::unbounded();
+        let engine =
+            hitch_context::Engine::start(hitch_context::Config::default(), move |event| {
+                let _ = tx.unbounded_send(event);
+            })?;
+        let sink = engine.sink();
+        let clawswap = hitch_context::clawswap::spawn(
+            hitch_context::clawswap::ClawswapConfig::from_env(),
+            move |message| sink.message(message),
+        );
+        Ok(Self {
+            engine,
+            events: Events(Arc::new(Mutex::new(Some(rx)))),
+            _clawswap: clawswap,
+        })
     }
 
     /// The contexts that are current right now.
     pub fn current(&self) -> ActiveContexts {
-        ActiveContexts::new(
-            self.start_dir
-                .iter()
-                .map(|path| Context::Folder { path: path.clone() })
-                .collect(),
-        )
+        self.engine.current()
     }
 
     /// Asks the GNOME Shell extension to keep Hitch's windows above others
-    /// on every workspace (Wayland). The real engine holds the D-Bus
-    /// connection the pin is tied to.
-    pub fn set_keep_above(&self, _pinned: bool) {}
-
-    /// Context changes and commands, as they happen. The real engine calls
-    /// back from its own threads; this forwards them into iced through a
-    /// channel.
-    pub fn subscription(&self) -> Subscription<Event> {
-        Subscription::none()
+    /// on every workspace (Wayland). The pin lasts while the engine's D-Bus
+    /// connection does.
+    pub fn set_keep_above(&self, pinned: bool) -> io::Result<()> {
+        self.engine.set_keep_above(pinned)
     }
+
+    /// The engine's events, as they happen.
+    pub fn subscription(&self) -> Subscription<Event> {
+        Subscription::run_with(self.events.clone(), |events| {
+            // The receiver is taken once; iced keeps this subscription
+            // running for as long as the panel asks for it.
+            lock(&events.0)
+                .take()
+                .unwrap_or_else(|| mpsc::unbounded().1)
+        })
+    }
+}
+
+/// The receiving end of the engine's callback, handed to iced once.
+#[derive(Clone)]
+struct Events(Arc<Mutex<Option<mpsc::UnboundedReceiver<Event>>>>);
+
+impl Hash for Events {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        Arc::as_ptr(&self.0).hash(state);
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 #[cfg(test)]
