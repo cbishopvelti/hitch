@@ -9,6 +9,14 @@ publish = false
 
 [dependencies]
 hitch-protocol.workspace = true
+notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"

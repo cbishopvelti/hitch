@@ -17,7 +17,8 @@ pub trait ProjectFinder: Send {
     fn parents_with_notes(&self, project: &Path) -> Vec<PathBuf>;
 }
 
-/// Looks at the file system.
+/// Looks at the file system, using the store's rule
+/// ([`hitch_store::find_project`]).
 ///
 /// Walking up from the path, the first folder that has the notes file or a
 /// `.git` entry is the project. That way `~/playground/HITCH.md` doesn't
@@ -37,18 +38,10 @@ impl Default for FsProjectFinder {
     }
 }
 
-impl FsProjectFinder {
-    fn has_notes(&self, dir: &Path) -> bool {
-        dir.join(&self.notes_file_name).is_file()
-    }
-}
-
 impl ProjectFinder for FsProjectFinder {
     fn project_for(&self, dir: &Path, hint: Option<&Path>) -> PathBuf {
-        for d in dir.ancestors() {
-            if self.has_notes(d) || d.join(".git").exists() {
-                return d.to_path_buf();
-            }
+        if let Some(project) = hitch_store::find_project(dir, &self.notes_file_name) {
+            return project;
         }
         match hint {
             Some(h) if dir.starts_with(h) => h.to_path_buf(),
@@ -57,12 +50,7 @@ impl ProjectFinder for FsProjectFinder {
     }
 
     fn parents_with_notes(&self, project: &Path) -> Vec<PathBuf> {
-        project
-            .ancestors()
-            .skip(1)
-            .filter(|d| self.has_notes(d))
-            .map(Path::to_path_buf)
-            .collect()
+        hitch_store::ancestor_notes_folders(project, &self.notes_file_name)
     }
 }
 
