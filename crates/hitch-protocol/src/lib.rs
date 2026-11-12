@@ -9,6 +9,7 @@
 //! - [`message`]: the messages sent over the local socket.
 //! - [`frame`]: newline-delimited JSON framing.
 //! - [`paths`]: where the socket lives.
+//! - [`zed`]: reading Zed's active file from its window title.
 //!
 //! The wire format is documented for non-Rust clients in `docs/PROTOCOL.md`.
 
@@ -16,6 +17,7 @@ pub mod context;
 pub mod frame;
 pub mod message;
 pub mod paths;
+pub mod zed;
 
 #[cfg(unix)]
 pub mod client;
