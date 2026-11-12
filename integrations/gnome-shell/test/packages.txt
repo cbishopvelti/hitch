@@ -1,0 +1,9 @@
+gnome-shell
+dbus
+dbus-user-session
+systemd
+xwayland
+libgl1-mesa-dri
+python3-gi
+gir1.2-gtk-4.0
+libglib2.0-bin
