@@ -17,8 +17,10 @@
 //!   `hitch-store`, and re-read when a shown file changes on disk. Each
 //!   note is an H2 section. "Edit" opens it as Markdown with
 //!   a live preview; Esc or Ctrl+S saves. "+ Note" (or `hitch capture`,
-//!   Ctrl+Shift+H) starts a new note hitched to the most specific context,
-//!   with a dropdown to pick another. Task checkboxes toggle in place.
+//!   Ctrl+Shift+H) starts a new note hitched to the most specific context.
+//!   Its "Save to" dropdown (spec F14) lists the folders it can go into,
+//!   nearest first, starting on the project folder or the last choice made
+//!   here, and warns when a folder is above the file's git repo. Task checkboxes toggle in place.
 //! - **Copy and send** (spec F12, F13): every note and code block has a
 //!   Copy button; a code block's copies its code without the fences. Code
 //!   blocks also have Send to Zellij, which types the code into the last
@@ -33,7 +35,7 @@ mod panel_state;
 mod zellij;
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use hitch_context::ActiveContexts;
@@ -52,7 +54,7 @@ use iced::{
 
 use backend::{Engine, NoteGroup, Store, Watcher};
 use note_view::{Done, NoteViewer, Spot, TaskTarget};
-use panel_state::{Edge, PanelState};
+use panel_state::{Edge, PanelState, SavedChoice};
 
 /// Panel size from the spec: about 320 px wide.
 const PANEL_WIDTH: f32 = 320.0;
@@ -110,8 +112,11 @@ struct Panel {
     watcher: Watcher,
     contexts: ActiveContexts,
     groups: Vec<Group>,
-    /// Where a new note can be hitched, most specific first.
+    /// Where a new note can be saved, nearest first.
     choices: Vec<Choice>,
+    /// The choice a new note starts on when there's none remembered: the
+    /// project folder.
+    default_choice: usize,
     editor: Option<Editor>,
     mode: theme::Mode,
     /// The last thing that went wrong, shown under the notes until the next
@@ -177,12 +182,27 @@ struct ShownNote {
     first_code_block: usize,
 }
 
-/// A place a new note can be hitched to.
+/// A place a new note can be saved to (spec F14).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Choice {
+    /// The context the note is saved under. For a file this is the file,
+    /// relative to the chosen folder, so the note stays hitched to it.
     context: Context,
+    /// The notes file it goes into. It need not exist yet.
     path: PathBuf,
     label: String,
+    /// Shown before saving when the folder is above the file's git repo.
+    warning: Option<String>,
+}
+
+impl Choice {
+    /// How the choice is remembered in panel.json.
+    fn saved(&self) -> SavedChoice {
+        SavedChoice {
+            path: self.path.clone(),
+            file: matches!(self.context, Context::File { .. }),
+        }
+    }
 }
 
 impl fmt::Display for Choice {
@@ -298,6 +318,7 @@ impl Panel {
             store,
             groups: Vec::new(),
             choices: Vec::new(),
+            default_choice: 0,
             editor: None,
             mode: theme::Mode::None,
             error: None,
@@ -679,21 +700,27 @@ impl Panel {
     /// Re-reads the notes for the active contexts.
     fn reload(&mut self) {
         self.can_send = self.engine.zellij_target().is_some();
-        self.choices = hitch_targets(&self.contexts.contexts)
-            .into_iter()
-            .map(|context| Choice {
-                path: self.store.notes_path(&context),
-                label: match &context {
-                    Context::Folder { path } => label::tilde(path),
-                    other => label::context(other),
-                },
-                context,
-            })
-            .collect();
+        (self.choices, self.default_choice) = save_choices(&self.contexts.contexts, &self.store);
         self.watcher
             .watch_only(self.choices.iter().map(|c| c.path.clone()));
 
-        let groups = match self.store.notes_for_all(&self.contexts.contexts) {
+        // A note just saved to a folder between the file and its project
+        // makes that folder the project; show its notes before the engine
+        // next resolves the file.
+        let inner = self.choices.iter().filter_map(|c| match &c.context {
+            Context::File { project, .. } if c.path.is_file() => self
+                .contexts
+                .contexts
+                .iter()
+                .any(|ctx| {
+                    matches!(ctx, Context::File { project: outer, .. }
+                        if project != outer && project.starts_with(outer))
+                })
+                .then(|| c.context.clone()),
+            _ => None,
+        });
+        let shown: Vec<Context> = inner.chain(self.contexts.contexts.clone()).collect();
+        let groups = match self.store.notes_for_all(&shown) {
             Ok(groups) => groups,
             Err(e) => {
                 self.error = Some(format!("Couldn't read notes: {e}"));
@@ -730,24 +757,59 @@ impl Panel {
             .collect();
 
         // A new note's target may have gone away with the old contexts.
+        let start = self.start_choice();
         if let Some(Editor {
             target: Target::New { choice },
             ..
         }) = &mut self.editor
             && !self.choices.contains(choice)
-            && let Some(first) = self.choices.first()
+            && let Some(start) = start
         {
-            *choice = first.clone();
+            *choice = start;
         }
     }
 
     fn start_new_note(&mut self) -> Task<Message> {
         self.commit_edit();
-        let Some(choice) = self.choices.first().cloned() else {
+        let Some(choice) = self.start_choice() else {
             self.error = Some("Nothing to hitch a note to yet.".into());
             return Task::none();
         };
         self.open_editor(Target::New { choice }, "## ")
+    }
+
+    /// The choice a new note starts on: the last one used for these
+    /// contexts, else the project folder.
+    fn start_choice(&self) -> Option<Choice> {
+        let default = self.choices.get(self.default_choice)?;
+        self.state
+            .save_to
+            .get(&remember_key(default))
+            .and_then(|saved| self.choices.iter().find(|c| c.saved() == *saved))
+            .or(Some(default))
+            .cloned()
+    }
+
+    /// Remembers `choice` as the place new notes go for the current
+    /// contexts (spec F14: the last choice per project).
+    fn remember_choice(&mut self, choice: &Choice) {
+        let Some(default) = self.choices.get(self.default_choice) else {
+            return;
+        };
+        let key = remember_key(default);
+        let saved = choice.saved();
+        if self.state.save_to.get(&key) == Some(&saved) {
+            return;
+        }
+        if saved == default.saved() {
+            self.state.save_to.remove(&key);
+        } else {
+            self.state.save_to.insert(key, saved);
+        }
+        if let Some(path) = &self.state_path {
+            let result = self.state.save(path);
+            self.report(result);
+        }
     }
 
     fn start_edit(&mut self, group: usize, note: usize) -> Task<Message> {
@@ -799,7 +861,11 @@ impl Panel {
             }
             (Target::New { choice }, Some((title, body))) => {
                 let note = new_note(&choice.context, title, body);
-                self.store.save_note(&choice.path, note).map(drop)
+                let saved = self.store.save_note(&choice.path, note).map(drop);
+                if saved.is_ok() {
+                    self.remember_choice(&choice.clone());
+                }
+                saved
             }
         };
         match result {
@@ -965,13 +1031,19 @@ impl Panel {
             ..
         }) = &self.editor
         {
-            let hitching = row![
-                text("Hitching to:").size(12),
-                pick_list(&self.choices[..], Some(choice), Message::HitchTo).text_size(12),
+            let save_to = row![
+                text("Save to:").size(12),
+                pick_list(&self.choices[..], Some(choice), Message::HitchTo)
+                    .text_size(12)
+                    .width(Fill),
             ]
             .spacing(8)
             .align_y(iced::Center);
-            list = list.push(column![hitching, self.editor_view(settings)].spacing(8));
+            let mut capture = column![save_to].spacing(8);
+            if let Some(warning) = &choice.warning {
+                capture = capture.push(text(warning).size(12).style(text::warning));
+            }
+            list = list.push(capture.push(self.editor_view(settings)));
         }
 
         let groups: Vec<_> = self
@@ -1156,22 +1228,110 @@ fn hint<'a>(content: impl Into<Element<'a, Message>>, tip: String) -> Element<'a
 /// Where a new note can go: the active contexts, most specific first, with
 /// each file's project folder right after it, so making a note
 /// project-wide is one pick away (spec, matching rule 4).
-fn hitch_targets(contexts: &[Context]) -> Vec<Context> {
-    let mut targets: Vec<Context> = Vec::new();
-    for context in contexts {
-        let project = match context {
-            Context::File { project, .. } => Some(Context::Folder {
-                path: project.clone(),
-            }),
-            _ => None,
+fn save_choices(contexts: &[Context], store: &Store) -> (Vec<Choice>, usize) {
+    let file_name = store.file_name();
+    // Repo warnings are measured from the most specific file or folder.
+    let anchor = contexts.iter().find_map(|c| match c {
+        Context::File { project, file } => Some(project.join(file)),
+        Context::Folder { path } => Some(path.clone()),
+        _ => None,
+    });
+    let warning = |folder: &Path| {
+        let repo = hitch_store::outside_repo(folder, anchor.as_deref()?)?;
+        let name = repo
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| label::tilde(&repo));
+        Some(format!(
+            "{} is outside the {name} repo, so this note won't be committed with it.",
+            label::tilde(folder)
+        ))
+    };
+    let folder_label = |folder: &Path, extra: &str| {
+        let new = if folder.join(file_name).is_file() {
+            ""
+        } else {
+            " (new)"
         };
-        for target in std::iter::once(context.clone()).chain(project) {
-            if !targets.contains(&target) {
-                targets.push(target);
+        format!("{}{extra}{new}", label::tilde(folder))
+    };
+
+    let mut choices: Vec<Choice> = Vec::new();
+    let mut default = None;
+    for context in contexts {
+        match context {
+            Context::File { project, file } => {
+                let abs = project.join(file);
+                for folder in hitch_store::save_folders(&abs, project, file_name) {
+                    let file = hitch_store::relative_to(&abs, &folder.path)
+                        .unwrap_or_else(|| file.clone());
+                    let context = Context::File {
+                        project: folder.path.clone(),
+                        file,
+                    };
+                    if choices.iter().any(|c| c.context == context) {
+                        continue;
+                    }
+                    let is_project = folder.path == *project;
+                    if is_project && default.is_none() {
+                        default = Some(choices.len());
+                    }
+                    choices.push(Choice {
+                        path: store.notes_path(&context),
+                        label: folder_label(&folder.path, ""),
+                        warning: warning(&folder.path),
+                        context,
+                    });
+                    // Next to it, the project folder for the whole project
+                    // rather than hitched to the file.
+                    let whole = Context::Folder {
+                        path: project.clone(),
+                    };
+                    if is_project && !choices.iter().any(|c| c.context == whole) {
+                        choices.push(Choice {
+                            path: store.notes_path(&whole),
+                            label: folder_label(project, ", whole project"),
+                            warning: warning(project),
+                            context: whole,
+                        });
+                    }
+                }
+            }
+            Context::Folder { path } => {
+                let notes = store.notes_path(context);
+                // A file's choices already cover this folder.
+                if choices.iter().any(|c| c.path == notes) {
+                    continue;
+                }
+                default.get_or_insert(choices.len());
+                choices.push(Choice {
+                    path: notes,
+                    label: folder_label(path, ""),
+                    warning: warning(path),
+                    context: context.clone(),
+                });
+            }
+            other => {
+                if choices.iter().any(|c| c.context == *other) {
+                    continue;
+                }
+                default.get_or_insert(choices.len());
+                choices.push(Choice {
+                    path: store.notes_path(other),
+                    label: label::context(other),
+                    warning: None,
+                    context: other.clone(),
+                });
             }
         }
     }
-    targets
+    (choices, default.unwrap_or(0))
+}
+
+/// The key a remembered choice is kept under: the default choice's notes
+/// file, which stands for the project.
+fn remember_key(default: &Choice) -> String {
+    default.path.to_string_lossy().into_owned()
 }
 
 /// A new note for `context`. For a file it is hitched to that file (spec,
@@ -1388,22 +1548,74 @@ mod tests {
     }
 
     #[test]
-    fn a_file_offers_its_project_folder_next() {
-        let file = Context::File {
-            project: "/p".into(),
-            file: "a.rs".into(),
-        };
-        let folder = Context::Folder { path: "/p".into() };
-        let parent = Context::Folder { path: "/".into() };
+    fn save_to_lists_folders_nearest_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let playground = root.join("playground");
+        let boodle = playground.join("boodle");
+        let src = boodle.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir(boodle.join(".git")).unwrap();
+        std::fs::write(playground.join("HITCH.md"), "").unwrap();
+        std::fs::write(src.join("main.rs"), "").unwrap();
+        let store = Store::new(hitch_store::StoreConfig::new(root.join(".hitch")));
+
+        let contexts = [
+            Context::File {
+                project: boodle.clone(),
+                file: "src/main.rs".into(),
+            },
+            Context::Folder {
+                path: boodle.clone(),
+            },
+            Context::Folder {
+                path: playground.clone(),
+            },
+            Context::App {
+                app_id: "dev.zed.Zed".into(),
+            },
+        ];
+        let (choices, default) = save_choices(&contexts, &store);
+        let targets: Vec<_> = choices.iter().map(|c| c.context.clone()).collect();
         assert_eq!(
-            hitch_targets(&[file.clone(), parent.clone()]),
-            vec![file.clone(), folder.clone(), parent.clone()]
+            targets,
+            vec![
+                Context::File {
+                    project: src.clone(),
+                    file: "main.rs".into(),
+                },
+                Context::File {
+                    project: boodle.clone(),
+                    file: "src/main.rs".into(),
+                },
+                Context::Folder {
+                    path: boodle.clone(),
+                },
+                Context::File {
+                    project: playground.clone(),
+                    file: "boodle/src/main.rs".into(),
+                },
+                Context::App {
+                    app_id: "dev.zed.Zed".into(),
+                },
+            ]
         );
-        // No duplicate when the engine already reports the folder.
-        assert_eq!(
-            hitch_targets(&[file.clone(), folder.clone()]),
-            vec![file, folder]
+        assert_eq!(default, 1, "the project folder is the default");
+        assert!(choices[0].label.ends_with(" (new)"));
+        assert!(choices[..3].iter().all(|c| c.warning.is_none()));
+        let warning = choices[3].warning.as_deref().unwrap();
+        assert!(
+            warning
+                .ends_with("is outside the boodle repo, so this note won't be committed with it."),
+            "{warning}"
         );
+        assert_eq!(choices[3].path, playground.join("HITCH.md"));
+
+        // A folder alone defaults to itself.
+        let (choices, default) = save_choices(&contexts[1..3], &store);
+        assert_eq!(choices.len(), 2);
+        assert_eq!(default, 0);
+        assert!(choices[1].warning.is_some());
     }
 
     #[test]
