@@ -32,8 +32,8 @@ pub mod watch;
 pub use format::NotesFile;
 pub use index::{Index, SearchHit};
 pub use project::{
-    ancestor_notes_folders, app_file_name, find_project, normalize, relative_to, site_file_name,
-    site_key,
+    SaveFolder, ancestor_notes_folders, app_file_name, find_project, git_root, normalize,
+    outside_repo, relative_to, save_folders, site_file_name, site_key,
 };
 pub use store::{NoteGroup, Store, StoreConfig};
 pub use watch::NotesWatcher;

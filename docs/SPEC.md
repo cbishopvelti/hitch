@@ -97,6 +97,7 @@ The main context is a file on disk. Wherever Hitch can tell which file or projec
 | F11 | Import and export as a folder of Markdown files | Should |
 | F12 | One-click copy: a copy button on every code block and note, and number keys 1 to 9 copy the panel's code blocks in order | Must |
 | F13 | Send a code block to Zellij: typed into the last focused Zellij pane without pressing Enter; Shift+click runs it | Must |
+| F14 | Choose on save which folder's HITCH.md a note goes into; warn when that folder is outside the file's git repo | Must |
 
 **Non-functional**
 
@@ -111,7 +112,7 @@ Hitch is one floating panel, shown and hidden with a shortcut; it never takes ov
 - **Opening Hitch.** Started like any app; Ctrl/Cmd+Shift+N then shows or hides the panel.
 - **Code blocks.** Each one shows two buttons on hover: Copy, and Send to Zellij (only when a Zellij session is running). Copy puts the exact text on the clipboard with no Markdown fences and briefly shows "Copied". Send types the command into the last focused Zellij pane and leaves it unrun so it can be checked; Shift+click also presses Enter. With the panel focused, keys 1 to 9 copy code blocks in order, and Shift with the number sends them.
 - **Panel.** A narrow floating window (about 320 px wide) docked to a screen edge the user chooses. Sections per active context, each with its label (app icon, folder name, domain). A pin button (and shortcut Ctrl/Cmd+Shift+P) keeps the panel always on top of other windows, on every desktop or Space, until unpinned; unpinned, it auto-hides. The pin state is remembered across restarts. On Ubuntu Wayland, apps cannot set always-on-top themselves, so the GNOME extension does it for Hitch.
-- **Quick capture.** A compact editor that opens near the cursor, shows "Hitching to: ~/code/bnotes" with a dropdown to change it, and saves on Esc.
+- **Quick capture.** A compact editor that opens near the cursor, with a "Save to" picker beside the text and saves on Esc. The picker lists the folders the note can go into, nearest first: each folder from the file's own folder up to its project folder (the default), then any folder further up that already has a HITCH.md. Choosing a folder with no HITCH.md creates one there on save. If the chosen folder is above the git repo the file is in, the editor shows a warning before saving, e.g. "~/playground is outside the boodle repo, so this note won't be committed with it." Saving still works; the warning just makes the choice deliberate. The last choice per project is remembered.
 - **Empty state.** "No notes here yet. Press Ctrl/Cmd+Shift+H to add one."
 - **Permissions onboarding.** On first run on macOS, a short screen explains why Accessibility and Automation access are needed and opens the right System Settings pane. On Ubuntu with Wayland, it offers to install the small GNOME extension Hitch needs (see Architecture).
 - **Settings.** Shortcuts, panel position and behaviour, notes file name, fallback folder location, ignore list, and the clawswap daemon address.

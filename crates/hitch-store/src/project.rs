@@ -32,6 +32,67 @@ pub fn ancestor_notes_folders(project: &Path, file_name: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+/// The git repo `path` is in: walking up from it (from its folder, if it
+/// is a file), the first folder with a `.git` folder or file.
+pub fn git_root(path: &Path) -> Option<PathBuf> {
+    start_folder(path)
+        .ancestors()
+        .find(|dir| dir.join(".git").exists())
+        .map(Path::to_path_buf)
+}
+
+/// The root of the git repo `path` is in, when `folder` lies above it, so a
+/// notes file saved in `folder` would not be committed with that repo.
+/// `None` when `path` isn't in a repo or `folder` is inside it (or beside
+/// it: only folders the repo is inside count as "above").
+pub fn outside_repo(folder: &Path, path: &Path) -> Option<PathBuf> {
+    let root = git_root(path)?;
+    let folder = normalize(folder);
+    (root != folder && root.starts_with(&folder)).then_some(root)
+}
+
+/// A folder a new note can be saved to (spec F14).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SaveFolder {
+    pub path: PathBuf,
+    /// The folder already has the notes file. Saving to one that doesn't
+    /// creates it.
+    pub has_notes: bool,
+    /// The root of the git repo `path` is in, when this folder is above it.
+    /// The panel warns before saving there.
+    pub outside_repo: Option<PathBuf>,
+}
+
+/// The folders a note about `path` can be saved to, nearest first (spec
+/// F14): every folder from `path`'s own folder up to `project` (the
+/// default), then each folder further up that already has the notes file.
+/// When `path` isn't inside `project`, the list starts at `project`.
+pub fn save_folders(path: &Path, project: &Path, file_name: &str) -> Vec<SaveFolder> {
+    let project = normalize(project);
+    let start = start_folder(path);
+    let start = if start.starts_with(&project) {
+        start
+    } else {
+        project.clone()
+    };
+    let up_to_project = start
+        .ancestors()
+        .take_while(|dir| dir.starts_with(&project))
+        .map(Path::to_path_buf);
+    let above: Vec<PathBuf> = ancestor_notes_folders(&project, file_name);
+    let root = git_root(path);
+    up_to_project
+        .chain(above)
+        .map(|dir| SaveFolder {
+            has_notes: dir.join(file_name).is_file(),
+            outside_repo: root
+                .clone()
+                .filter(|root| *root != dir && root.starts_with(&dir)),
+            path: dir,
+        })
+        .collect()
+}
+
 /// The folder to start from: `path` itself if it is a folder, else its
 /// parent. A path that doesn't exist is treated as a file.
 pub(crate) fn start_folder(path: &Path) -> PathBuf {
@@ -159,6 +220,52 @@ mod tests {
 
         // The configured file name is the one that counts.
         assert_eq!(find_project(&playground, "NOTES.md"), None);
+    }
+
+    #[test]
+    fn save_folders_nearest_first_and_repo_boundary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let playground = root.join("playground");
+        let boodle = playground.join("boodle");
+        let src = boodle.join("src").join("parse");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir(boodle.join(".git")).unwrap();
+        fs::write(playground.join("HITCH.md"), "").unwrap();
+        fs::write(src.join("lexer.rs"), "").unwrap();
+        let file = src.join("lexer.rs");
+
+        let folders = save_folders(&file, &boodle, "HITCH.md");
+        let paths: Vec<_> = folders.iter().map(|f| f.path.clone()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                src.clone(),
+                boodle.join("src"),
+                boodle.clone(),
+                playground.clone()
+            ]
+        );
+        assert!(folders[..3].iter().all(|f| f.outside_repo.is_none()));
+        assert_eq!(folders[3].outside_repo, Some(boodle.clone()));
+        assert!(folders[3].has_notes);
+        assert!(!folders[2].has_notes);
+
+        assert_eq!(git_root(&file), Some(boodle.clone()));
+        assert_eq!(outside_repo(&playground, &file), Some(boodle.clone()));
+        assert_eq!(outside_repo(&boodle, &file), None);
+        assert_eq!(outside_repo(&src, &file), None);
+        // Not in a repo: nothing to warn about.
+        assert_eq!(outside_repo(root, &playground.join("HITCH.md")), None);
+
+        // A folder context starts at the folder itself.
+        let folders = save_folders(&boodle, &boodle, "HITCH.md");
+        assert_eq!(folders.len(), 2);
+        assert_eq!(folders[0].path, boodle);
+
+        // A path outside the project starts at the project.
+        let folders = save_folders(&root.join("elsewhere.rs"), &boodle, "HITCH.md");
+        assert_eq!(folders[0].path, boodle);
     }
 
     #[test]

@@ -1,9 +1,10 @@
-//! Panel state that survives restarts: whether the panel is pinned, and the
-//! screen edge it docks to.
+//! Panel state that survives restarts: whether the panel is pinned, the
+//! screen edge it docks to, and the last "Save to" choice per project.
 //!
 //! Kept in `~/.hitch/panel.json`, apart from `settings.json`, because it is
 //! state the panel changes as you use it rather than a preference you edit.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -24,6 +25,17 @@ pub struct PanelState {
     /// Always on top, on every workspace, until unpinned (spec, UX).
     pub pinned: bool,
     pub edge: Edge,
+    /// The last "Save to" choice per project (spec F14), keyed by the
+    /// project's notes file. Only choices other than the default are kept.
+    pub save_to: BTreeMap<String, SavedChoice>,
+}
+
+/// A remembered "Save to" choice: the notes file, and whether the note is
+/// hitched to the file being edited or saved for the whole folder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedChoice {
+    pub path: PathBuf,
+    pub file: bool,
 }
 
 impl PanelState {
@@ -79,10 +91,18 @@ mod tests {
 
         assert_eq!(PanelState::load(&path), PanelState::default());
 
-        let state = PanelState {
+        let mut state = PanelState {
             pinned: true,
             edge: Edge::Left,
+            ..PanelState::default()
         };
+        state.save_to.insert(
+            "/p/HITCH.md".into(),
+            SavedChoice {
+                path: "/HITCH.md".into(),
+                file: true,
+            },
+        );
         state.save(&path).unwrap();
         assert_eq!(PanelState::load(&path), state);
 
@@ -92,7 +112,7 @@ mod tests {
             PanelState::load(&path),
             PanelState {
                 pinned: true,
-                edge: Edge::Right
+                ..PanelState::default()
             }
         );
 
