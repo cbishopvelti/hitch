@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Hitch
+Comment=Notes that follow what you're working on
+Exec=hitch
+Icon=io.github.cbishopvelti.Hitch
+StartupWMClass=io.github.cbishopvelti.Hitch
+Categories=Utility;
+Terminal=false
