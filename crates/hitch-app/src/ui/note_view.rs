@@ -113,6 +113,8 @@ pub enum Spot {
     Block { target: TaskTarget, index: usize },
     /// A whole note's Copy button.
     Note { group: usize, note: usize },
+    /// The Copy button of a GNOME extension setup step.
+    Setup(usize),
 }
 
 /// What a button briefly says it did.

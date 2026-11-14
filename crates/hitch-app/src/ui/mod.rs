@@ -36,12 +36,17 @@
 //! - **Branches**: when clawswap runs the project you're in, "Branches"
 //!   opens its branch page in a small window beside the panel (see
 //!   [`branches`]).
+//! - **GNOME extension setup**: on GNOME Wayland, when the Hitch extension
+//!   isn't running, the panel lists what's left to do (install, turn on,
+//!   log out and back in), each with a command to copy and, where it can,
+//!   a button that does it (see [`shell_setup`]).
 
 mod backend;
 mod branches;
 mod label;
 mod note_view;
 mod panel_state;
+mod shell_setup;
 mod zellij;
 
 use std::fmt;
@@ -165,6 +170,8 @@ struct Panel {
     clawswap: ClawswapProjects,
     clawswap_projects: Vec<hitch_context::clawswap::Project>,
     branch_window: BranchWindow,
+    /// Why the GNOME extension isn't running, while that notice is shown.
+    shell_setup: shell_setup::Status,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,9 +185,8 @@ pub enum Notice {
 impl Notice {
     fn text(self) -> String {
         match self {
-            Notice::NoShellExtension => "Hitch can't see which window has focus or keep the \
-                panel on top: the Hitch GNOME Shell extension isn't running."
-                .into(),
+            // Shown with its setup steps, see `shell_setup_view`.
+            Notice::NoShellExtension => String::new(),
             Notice::ZedTitleSetting => format!(
                 "Zed's window title doesn't show the file, so Hitch can't tell which file \
                  is open. Add {} to ~/.config/zed/settings.json.",
@@ -259,6 +265,10 @@ enum Target {
 pub enum Message {
     Engine(backend::Event),
     Dismiss(Notice),
+    /// Do a GNOME extension setup step.
+    ShellFix(shell_setup::Fix),
+    /// Look again at why the GNOME extension isn't running.
+    ShellCheck,
     /// A watched notes file changed on disk.
     NotesChanged,
     Window(window::Id, WindowEvent),
@@ -373,6 +383,7 @@ impl Panel {
             clawswap: ClawswapProjects::start(),
             clawswap_projects: Vec::new(),
             branch_window: BranchWindow::default(),
+            shell_setup: shell_setup::Status::default(),
         };
         if panel.state.pinned {
             panel.keep_above();
@@ -422,6 +433,7 @@ impl Panel {
                 if available || !is_wayland() {
                     self.notices.retain(|n| *n != Notice::NoShellExtension);
                 } else {
+                    self.shell_setup = shell_setup::Status::check();
                     self.notice(Notice::NoShellExtension);
                 }
                 Task::none()
@@ -434,6 +446,20 @@ impl Panel {
             // Only the shown notes files are watched, so any change is ours.
             Message::NotesChanged => {
                 self.reload();
+                Task::none()
+            }
+            Message::ShellFix(fix) => {
+                match shell_setup::apply(fix) {
+                    Ok(()) => self.error = None,
+                    Err(e) => {
+                        self.error = Some(format!("Couldn't set up the GNOME extension: {e}"))
+                    }
+                }
+                self.shell_setup = shell_setup::Status::check();
+                Task::none()
+            }
+            Message::ShellCheck => {
+                self.shell_setup = shell_setup::Status::check();
                 Task::none()
             }
             Message::Dismiss(notice) => {
@@ -1055,6 +1081,10 @@ impl Panel {
         let notes = self.notes_view();
         let mut body = column![self.header(), rule::horizontal(1), notes];
         for notice in &self.notices {
+            if *notice == Notice::NoShellExtension {
+                body = body.push(self.shell_setup_view());
+                continue;
+            }
             body = body.push(
                 container(
                     row![
@@ -1079,6 +1109,78 @@ impl Panel {
             );
         }
         with_resize_grips(container(body).style(container::bordered_box).into())
+    }
+
+    /// The GNOME extension notice: what's wrong and the steps left to fix
+    /// it, each with its command to copy and a button that does it.
+    fn shell_setup_view(&self) -> Element<'_, Message> {
+        let status = &self.shell_setup;
+        let mut card = column![text(status.headline()).size(12).font(BOLD)].spacing(6);
+        let steps = status.steps(shell_setup::repo().as_deref());
+        for (i, step) in steps.iter().enumerate() {
+            let mut line = row![
+                text(format!("{}.", i + 1)).size(12),
+                text(step.text.clone()).size(12).width(Fill),
+            ]
+            .spacing(4)
+            .align_y(iced::Top);
+            if let Some(fix) = step.fix {
+                line = line.push(
+                    button(text(fix.label()).size(11))
+                        .padding([2, 8])
+                        .style(button::primary)
+                        .on_press(Message::ShellFix(fix)),
+                );
+            }
+            card = card.push(line);
+            if let Some(command) = &step.command {
+                let spot = Spot::Setup(i);
+                let copied = self.flash == Some((spot, Done::Copied));
+                card = card.push(
+                    container(
+                        row![
+                            text(command.clone())
+                                .size(11)
+                                .font(Font::MONOSPACE)
+                                .width(Fill),
+                            hint(
+                                button(text(if copied { "Copied" } else { "Copy" }).size(11))
+                                    .padding([2, 6])
+                                    .style(button::secondary)
+                                    .on_press(Message::Copy {
+                                        text: command.clone(),
+                                        spot,
+                                    }),
+                                "Copy the command".into(),
+                            ),
+                        ]
+                        .spacing(6)
+                        .align_y(iced::Center),
+                    )
+                    .padding([4, 8])
+                    .width(Fill)
+                    .style(container::bordered_box),
+                );
+            }
+        }
+        let mut footer = row![space::horizontal()].spacing(6);
+        if status.gnome {
+            footer = footer.push(
+                button(text("Check again").size(11))
+                    .style(button::text)
+                    .on_press(Message::ShellCheck),
+            );
+        }
+        footer = footer.push(
+            button(text("Dismiss").size(11))
+                .style(button::text)
+                .on_press(Message::Dismiss(Notice::NoShellExtension)),
+        );
+        container(card.push(footer))
+            .padding([8, 12])
+            .width(Fill)
+            .style(container::secondary)
+            .into()
     }
 
     /// The clawswap project the active contexts are in, if its daemon is
