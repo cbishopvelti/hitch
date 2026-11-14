@@ -107,6 +107,7 @@ On Wayland only the shell knows the focused window, so the extension in [`integr
 - **Method `GetFocus() -> (a{sv} focus)`**.
 - **Signal `FocusChanged(a{sv} focus)`**, when the focused window changes and when its title changes.
 - **Method `SetKeepAbove(b pinned)`**: keeps every window of the calling process (matched by the caller's PID) above others and on all workspaces, including windows it opens later, until called with `false` or the caller leaves the bus. This is how the panel pin works on Wayland.
+- **Method `DockBeside(u pid)`**: keeps the calling process's windows against the side of process `pid`'s window, at its top and height, on the side with more room, and moves them when that window moves or resizes, until the caller leaves the bus. `hitch-web` calls it with the panel's pid, because a Wayland app can't place its own windows. Added without a `Version` change: an older extension answers with an unknown-method error and the window stays where the shell put it.
 - **Property `Version` (u, read-only)**, currently `1`.
 
 `focus` keys, always present; all empty or 0 when nothing is focused (desktop, overview):

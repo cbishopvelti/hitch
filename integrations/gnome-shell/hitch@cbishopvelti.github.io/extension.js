@@ -6,6 +6,8 @@
 //
 //   * GetFocus / FocusChanged report the focused window (app id, WM class,
 //     title, pid), including title changes of the focused window.
+//   * DockBeside keeps the calling process's windows against the side of
+//     another process's window (the clawswap branch page beside the panel).
 //   * SetKeepAbove pins every window of the calling process above other
 //     windows and on all workspaces.
 //
@@ -13,6 +15,7 @@
 
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
 
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
@@ -29,6 +32,9 @@ const INTERFACE_XML = `
     </method>
     <method name="SetKeepAbove">
       <arg type="b" name="pinned" direction="in"/>
+    </method>
+    <method name="DockBeside">
+      <arg type="u" name="pid" direction="in"/>
     </method>
     <signal name="FocusChanged">
       <arg type="a{sv}" name="focus"/>
@@ -109,6 +115,9 @@ class HitchShellService {
         // Windows we made above/sticky (-> their 'unmanaged' handler id), so
         // we only undo what we did.
         this._ourWindows = new Map();
+        // D-Bus unique name of each caller that asked to be docked ->
+        // {pid, besidePid, watchId, beside, besideSignals}.
+        this._docks = new Map();
 
         this._dbus = Gio.DBusExportedObject.wrapJSObject(INTERFACE_XML, this);
     }
@@ -135,6 +144,8 @@ class HitchShellService {
         for (const sender of [...this._pinned.keys()])
             this._unpin(sender);
         this._pinned.clear();
+        for (const sender of [...this._docks.keys()])
+            this._undock(sender);
 
         if (this._nameId) {
             Gio.bus_unown_name(this._nameId);
@@ -160,7 +171,17 @@ class HitchShellService {
             invocation.return_value(null);
             return;
         }
+        this._withCallerPid(invocation, pid => this._pin(sender, pid));
+    }
 
+    DockBesideAsync([besidePid], invocation) {
+        const sender = invocation.get_sender();
+        this._withCallerPid(invocation, pid => this._dock(sender, pid, besidePid));
+    }
+
+    // Runs `then(pid)` with the calling process's id and answers the call.
+    _withCallerPid(invocation, then) {
+        const sender = invocation.get_sender();
         Gio.DBus.session.call(
             'org.freedesktop.DBus', '/org/freedesktop/DBus', 'org.freedesktop.DBus',
             'GetConnectionUnixProcessID', new GLib.Variant('(s)', [sender]),
@@ -174,7 +195,7 @@ class HitchShellService {
                         `Could not find the caller's process: ${e.message}`);
                     return;
                 }
-                this._pin(sender, pid);
+                then(pid);
                 invocation.return_value(null);
             });
     }
@@ -254,7 +275,10 @@ class HitchShellService {
     }
 
     _onWindowCreated(win) {
-        if (this._pinned.size === 0 || !this._isPinnedPid(win.get_pid()))
+        const pid = win.get_pid();
+        const docks = [...this._docks.values()]
+            .filter(d => d.pid === pid || d.besidePid === pid);
+        if (!this._isPinnedPid(pid) && docks.length === 0)
             return;
         // Mutter applies the client's own initial state while placing a new
         // window, so set ours once it is shown.
@@ -262,7 +286,102 @@ class HitchShellService {
             win.disconnect(id);
             if (this._isPinnedPid(win.get_pid()))
                 this._makeAbove(win);
+            for (const dock of docks) {
+                if ([...this._docks.values()].includes(dock))
+                    this._applyDock(dock);
+            }
         });
+    }
+
+    // --- Dock beside ---------------------------------------------------------
+
+    _dock(sender, pid, besidePid) {
+        this._undock(sender);
+        // Undock when the caller leaves the bus: its window closed.
+        const watchId = Gio.bus_watch_name_on_connection(
+            Gio.DBus.session, sender, Gio.BusNameWatcherFlags.NONE,
+            null, () => this._undock(sender));
+        const dock = {sender, pid, besidePid, watchId, beside: null, besideSignals: [], placed: new WeakSet()};
+        this._docks.set(sender, dock);
+        this._applyDock(dock);
+    }
+
+    _undock(sender) {
+        const dock = this._docks.get(sender);
+        if (!dock)
+            return;
+        this._docks.delete(sender);
+        Gio.bus_unwatch_name(dock.watchId);
+        this._followBeside(dock, null);
+    }
+
+    // Follows the window the dock is beside, so the docked windows move and
+    // resize with it.
+    _followBeside(dock, win) {
+        if (dock.beside === win)
+            return;
+        for (const id of dock.besideSignals)
+            dock.beside.disconnect(id);
+        dock.beside = win;
+        dock.besideSignals = [];
+        if (!win)
+            return;
+        const apply = () => this._applyDock(dock);
+        dock.besideSignals = [
+            win.connect('position-changed', apply),
+            win.connect('size-changed', apply),
+            win.connect('unmanaged', () => this._followBeside(dock, null)),
+        ];
+    }
+
+    // A window that asks to be docked as it opens may not have been placed
+    // yet, and Mutter's own placement would then move it away again. So
+    // dock it once more when it is shown and when it has drawn.
+    _applyAgainOncePlaced(dock, win) {
+        if (dock.placed.has(win))
+            return;
+        dock.placed.add(win);
+        const again = () => {
+            if (this._docks.get(dock.sender) === dock)
+                this._applyDock(dock);
+        };
+        const shownId = win.connect('shown', () => {
+            win.disconnect(shownId);
+            again();
+        });
+        const actor = win.get_compositor_private();
+        if (actor) {
+            const frameId = actor.connect('first-frame', () => {
+                actor.disconnect(frameId);
+                again();
+            });
+        }
+    }
+
+    // Puts the dock's windows against the side of the window they are
+    // beside, at its height, on the side with more room (the left of a
+    // panel at the screen's right edge).
+    _applyDock(dock) {
+        const normal = win => win.get_window_type() === Meta.WindowType.NORMAL;
+        const beside = dock.beside ?? this._windowsOfPid(dock.besidePid).find(normal);
+        const docked = this._windowsOfPid(dock.pid).filter(normal);
+        if (!beside || docked.length === 0)
+            return;
+        this._followBeside(dock, beside);
+
+        const to = beside.get_frame_rect();
+        const area = beside.get_work_area_current_monitor();
+        for (const win of docked) {
+            this._applyAgainOncePlaced(dock, win);
+            const rect = win.get_frame_rect();
+            const left = to.x - rect.width;
+            const right = to.x + to.width;
+            const roomLeft = to.x - area.x;
+            const roomRight = area.x + area.width - right;
+            const x = roomLeft >= roomRight ? left : right;
+            if (rect.x !== x || rect.y !== to.y || rect.height !== to.height)
+                win.move_resize_frame(false, x, to.y, rect.width, to.height);
+        }
     }
 
     _makeAbove(win) {
