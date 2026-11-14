@@ -143,6 +143,9 @@ struct Panel {
     clipboard: Option<arboard::Clipboard>,
     /// A Zellij session has reported, so code blocks can be sent to it.
     can_send: bool,
+    /// Hitch hears which window has focus (the GNOME extension is on the
+    /// bus, or macOS), so auto-hide can wait for another window to take it.
+    focus_source: bool,
     /// The modifier keys held now, for Shift+click on Send.
     modifiers: Modifiers,
     /// The button that just copied or sent, and which flash this is.
@@ -184,6 +187,11 @@ struct PanelWindow {
     /// When a move (drag of the top bar) or resize (drag of an edge) last
     /// started.
     drag_started: Option<Instant>,
+    /// It lost focus and hides once another window is reported focused.
+    blurred: bool,
+    /// Another window was reported focused while the panel still had focus,
+    /// so the next loss of focus is a real switch, not a grab.
+    elsewhere: bool,
 }
 
 /// How long after a move or resize starts a loss of focus is taken to be
@@ -201,15 +209,31 @@ impl PanelWindow {
             id,
             focused: false,
             drag_started: None,
+            blurred: false,
+            elsewhere: false,
         }
     }
 
-    /// The panel lost focus at `now`: whether an unpinned panel should hide.
+    fn gained_focus(&mut self) {
+        self.focused = true;
+        self.blurred = false;
+        self.elsewhere = false;
+    }
+
+    /// The panel lost focus at `now`: whether an unpinned panel should hide
+    /// now. `focus_source` says whether Hitch hears which window has focus
+    /// (the GNOME extension, or macOS).
     ///
     /// A loss of focus just after a drag started comes from the drag, so the
     /// panel stays, and auto-hide waits for focus to come back when the
     /// drag ends, as it does for a panel that opened without focus.
-    fn unfocused(&mut self, now: Instant) -> bool {
+    ///
+    /// A keyboard grab, such as the Alt+Tab switcher, also takes focus
+    /// without another window getting it. With a focus source the panel
+    /// therefore waits for another window to be reported focused
+    /// ([`Self::other_window_focused`]), so it stays in the switcher while
+    /// the switcher is open. Without one it hides at once.
+    fn unfocused(&mut self, now: Instant, focus_source: bool) -> bool {
         let from_drag = self
             .drag_started
             .take()
@@ -218,7 +242,27 @@ impl PanelWindow {
             self.focused = false;
             return false;
         }
-        self.focused
+        if !self.focused {
+            return false;
+        }
+        if !focus_source || self.elsewhere {
+            return true;
+        }
+        self.blurred = true;
+        false
+    }
+
+    /// Another window was reported focused: whether an unpinned panel
+    /// should hide now. The report can come before or after the panel's
+    /// own loss of focus.
+    fn other_window_focused(&mut self) -> bool {
+        if self.blurred {
+            return true;
+        }
+        if self.focused {
+            self.elsewhere = true;
+        }
+        false
     }
 }
 
@@ -386,6 +430,7 @@ impl Panel {
             notices: Vec::new(),
             clipboard: arboard::Clipboard::new().ok(),
             can_send: false,
+            focus_source: cfg!(target_os = "macos"),
             modifiers: Modifiers::empty(),
             flash: None,
             flash_count: 0,
@@ -433,7 +478,20 @@ impl Panel {
                 Task::none()
             }
             Message::Engine(backend::Event::Command(command)) => self.command(command),
+            Message::Engine(backend::Event::OtherWindowFocused) => {
+                self.focus_source = true;
+                let hide = self
+                    .window
+                    .as_mut()
+                    .is_some_and(|window| window.other_window_focused());
+                if hide && !self.state.pinned {
+                    self.hide()
+                } else {
+                    Task::none()
+                }
+            }
             Message::Engine(backend::Event::ShellExtension { available }) => {
+                self.focus_source = available;
                 // Only GNOME on Wayland needs the extension.
                 if available || !is_wayland() {
                     self.notices.retain(|n| *n != Notice::NoShellExtension);
@@ -675,12 +733,14 @@ impl Panel {
         };
         match event {
             WindowEvent::Focused => {
-                window.focused = true;
+                window.gained_focus();
                 Task::none()
             }
             // Unpinned, the panel auto-hides (spec, UX), but not when
-            // dragging it takes focus away.
-            WindowEvent::Unfocused if window.unfocused(Instant::now()) && !self.state.pinned => {
+            // dragging it or the Alt+Tab switcher takes focus away.
+            WindowEvent::Unfocused
+                if window.unfocused(Instant::now(), self.focus_source) && !self.state.pinned =>
+            {
                 self.hide()
             }
             WindowEvent::Unfocused => Task::none(),
@@ -1652,27 +1712,65 @@ mod tests {
 
     #[test]
     fn dragging_does_not_hide_the_panel() {
+        for focus_source in [false, true] {
+            let start = Instant::now();
+            let mut window = PanelWindow::new(window::Id::unique());
+
+            // Opened without focus: losing focus doesn't hide it.
+            assert!(!window.unfocused(start, focus_source));
+            window.gained_focus();
+
+            // The window manager takes focus as the drag begins: it stays,
+            // and keeps staying until focus comes back.
+            window.drag_started = Some(start);
+            assert!(!window.unfocused(start + Duration::from_millis(30), focus_source));
+            assert!(!window.unfocused(start + Duration::from_secs(5), focus_source));
+            assert!(!window.other_window_focused());
+        }
+    }
+
+    #[test]
+    fn without_a_focus_source_losing_focus_hides() {
         let start = Instant::now();
         let mut window = PanelWindow::new(window::Id::unique());
-
-        // Opened without focus: losing focus doesn't hide it.
-        assert!(!window.unfocused(start));
-        window.focused = true;
-
-        // The window manager takes focus as the drag begins: it stays, and
-        // keeps staying until focus comes back.
-        window.drag_started = Some(start);
-        assert!(!window.unfocused(start + Duration::from_millis(30)));
-        assert!(!window.unfocused(start + Duration::from_secs(5)));
-
-        // Focus back after the drop; clicking elsewhere hides it again.
-        window.focused = true;
-        assert!(window.unfocused(start + Duration::from_secs(6)));
+        window.gained_focus();
+        assert!(window.unfocused(start, false));
 
         // A drag that never took focus doesn't stop a later click elsewhere
         // from hiding it.
+        window.gained_focus();
         window.drag_started = Some(start);
-        assert!(window.unfocused(start + DRAG_GRACE));
+        assert!(window.unfocused(start + DRAG_GRACE, false));
+    }
+
+    #[test]
+    fn alt_tab_keeps_the_panel_until_another_window_has_focus() {
+        let now = Instant::now();
+        let mut window = PanelWindow::new(window::Id::unique());
+        window.gained_focus();
+
+        // The switcher grabs the keyboard: the panel stays in it.
+        assert!(!window.unfocused(now, true));
+        // Alt+Tab back to the panel (Hitch's own focus isn't reported).
+        window.gained_focus();
+
+        // Alt+Tab to another window: focus leaves, then that window is
+        // reported focused.
+        assert!(!window.unfocused(now, true));
+        assert!(window.other_window_focused());
+    }
+
+    #[test]
+    fn a_focus_report_before_the_panel_loses_focus_still_hides_it() {
+        let now = Instant::now();
+        let mut window = PanelWindow::new(window::Id::unique());
+        window.gained_focus();
+        assert!(!window.other_window_focused());
+        assert!(window.unfocused(now, true));
+
+        // Reports from before the panel last had focus don't count.
+        window.gained_focus();
+        assert!(!window.unfocused(now, true));
     }
 
     fn ctrl() -> Modifiers {
