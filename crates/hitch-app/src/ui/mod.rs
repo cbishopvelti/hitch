@@ -36,7 +36,7 @@ mod zellij;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hitch_context::ActiveContexts;
 use hitch_protocol::{Command, Context};
@@ -165,6 +165,43 @@ struct PanelWindow {
     /// Whether it has had focus since it opened. Auto-hide waits for this,
     /// so a panel the compositor opened without focus doesn't vanish.
     focused: bool,
+    /// When a drag of the top bar last started.
+    drag_started: Option<Instant>,
+}
+
+/// How long after a drag starts a loss of focus is taken to be the drag's.
+///
+/// While the window manager moves a window it grabs the keyboard, and the
+/// panel is told it lost focus: X11 sends FocusOut for the grab, which
+/// winit reports as unfocused, and Mutter on Wayland can do the same. That
+/// happens as the move begins, so a short grace is enough.
+const DRAG_GRACE: Duration = Duration::from_secs(1);
+
+impl PanelWindow {
+    fn new(id: window::Id) -> Self {
+        Self {
+            id,
+            focused: false,
+            drag_started: None,
+        }
+    }
+
+    /// The panel lost focus at `now`: whether an unpinned panel should hide.
+    ///
+    /// A loss of focus just after a drag started comes from the drag, so the
+    /// panel stays, and auto-hide waits for focus to come back when the
+    /// drag ends, as it does for a panel that opened without focus.
+    fn unfocused(&mut self, now: Instant) -> bool {
+        let from_drag = self
+            .drag_started
+            .take()
+            .is_some_and(|started| now.saturating_duration_since(started) < DRAG_GRACE);
+        if from_drag {
+            self.focused = false;
+            return false;
+        }
+        self.focused
+    }
 }
 
 /// One section of the panel: the notes of one notes file.
@@ -400,8 +437,11 @@ impl Panel {
                 self.mode = mode;
                 Task::none()
             }
-            Message::Drag => match self.window {
-                Some(w) => window::drag(w.id),
+            Message::Drag => match self.window.as_mut() {
+                Some(w) => {
+                    w.drag_started = Some(Instant::now());
+                    window::drag(w.id)
+                }
                 None => Task::none(),
             },
             Message::Hide => self.hide(),
@@ -603,8 +643,11 @@ impl Panel {
                 window.focused = true;
                 Task::none()
             }
-            // Unpinned, the panel auto-hides (spec, UX).
-            WindowEvent::Unfocused if window.focused && !self.state.pinned => self.hide(),
+            // Unpinned, the panel auto-hides (spec, UX), but not when
+            // dragging it takes focus away.
+            WindowEvent::Unfocused if window.unfocused(Instant::now()) && !self.state.pinned => {
+                self.hide()
+            }
             WindowEvent::Unfocused => Task::none(),
             WindowEvent::CloseRequested => self.hide(),
             WindowEvent::Closed => {
@@ -622,7 +665,7 @@ impl Panel {
             return window::gain_focus(window.id);
         }
         let (id, open) = window::open(self.window_settings());
-        self.window = Some(PanelWindow { id, focused: false });
+        self.window = Some(PanelWindow::new(id));
         open.discard()
     }
 
@@ -1473,6 +1516,31 @@ fn open_url(url: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dragging_does_not_hide_the_panel() {
+        let start = Instant::now();
+        let mut window = PanelWindow::new(window::Id::unique());
+
+        // Opened without focus: losing focus doesn't hide it.
+        assert!(!window.unfocused(start));
+        window.focused = true;
+
+        // The window manager takes focus as the drag begins: it stays, and
+        // keeps staying until focus comes back.
+        window.drag_started = Some(start);
+        assert!(!window.unfocused(start + Duration::from_millis(30)));
+        assert!(!window.unfocused(start + Duration::from_secs(5)));
+
+        // Focus back after the drop; clicking elsewhere hides it again.
+        window.focused = true;
+        assert!(window.unfocused(start + Duration::from_secs(6)));
+
+        // A drag that never took focus doesn't stop a later click elsewhere
+        // from hiding it.
+        window.drag_started = Some(start);
+        assert!(window.unfocused(start + DRAG_GRACE));
+    }
 
     fn ctrl() -> Modifiers {
         if cfg!(target_os = "macos") {
