@@ -52,7 +52,7 @@ use iced::widget::{
     button, center, column, container, mouse_area, pick_list, row, rule, scrollable, space, text,
     text_editor, tooltip,
 };
-use iced::window::{self, Direction, Level};
+use iced::window::{self, Level};
 use iced::{
     Element, Event, Fill, Font, Point, Size, Subscription, Task, Theme, event, font, system, theme,
 };
@@ -289,8 +289,10 @@ pub enum Message {
     Shortcut(Shortcut),
     ThemeChanged(theme::Mode),
     Drag,
-    /// An edge or corner was pressed: resize the panel that way.
-    Resize(Direction),
+    /// An edge or corner was pressed: resize the panel that way. Not on
+    /// macOS, which has no grips (see [`with_resize_grips`]).
+    #[cfg(not(target_os = "macos"))]
+    Resize(window::Direction),
     Hide,
     TogglePin,
     NewNote,
@@ -468,6 +470,7 @@ impl Panel {
                 None => Task::none(),
             },
             // The window manager takes focus while it resizes too.
+            #[cfg(not(target_os = "macos"))]
             Message::Resize(direction) => match self.window.as_mut() {
                 Some(w) => {
                     w.drag_started = Some(Instant::now());
@@ -1477,6 +1480,7 @@ fn with_resize_grips(panel: Element<'_, Message>) -> Element<'_, Message> {
     use iced::Length::Fixed;
     use iced::mouse;
     use iced::widget::stack;
+    use iced::window::Direction;
     use mouse::Interaction::{
         ResizingDiagonallyDown as Nwse, ResizingDiagonallyUp as Nesw,
         ResizingHorizontally as Horizontal, ResizingVertically as Vertical,
