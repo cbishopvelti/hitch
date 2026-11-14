@@ -41,6 +41,12 @@ pub enum Event {
     /// A global shortcut from [`Config::global_shortcuts`] couldn't be
     /// registered, usually because another app holds it.
     ShortcutUnavailable { keys: String },
+    /// The OS focus source (the GNOME extension, or macOS) reported that a
+    /// window other than Hitch's own has focus. Sent at once, not debounced,
+    /// on every such report. The panel auto-hides on this rather than on its
+    /// own loss of focus, which a keyboard grab such as the Alt+Tab switcher
+    /// also causes.
+    OtherWindowFocused,
 }
 
 /// Engine settings.
@@ -418,7 +424,13 @@ impl LoopState {
                 false
             }
             Input::Message(ClientMessage::Hello { .. } | ClientMessage::Unknown) => false,
-            Input::Window(w) => self.resolver.window_focus(w, now),
+            Input::Window(w) => {
+                let other = self.resolver.window_focus(w, now);
+                if other {
+                    on_event(Event::OtherWindowFocused);
+                }
+                other
+            }
             Input::WindowGone => {
                 self.resolver.clear_window();
                 true
