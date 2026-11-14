@@ -6,6 +6,7 @@ members = [
     "crates/hitch-context",
     "crates/hitch-macos",
     "crates/hitch-app",
+    "crates/hitch-web",
 ]
 # Editor and terminal plugins build for wasm with their own toolchains and
 # dependencies, so they are separate Cargo projects, not workspace members.

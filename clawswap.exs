@@ -4,9 +4,12 @@
 [
   name: "hitch",
   servers: [
-    # `cargo run` rebuilds whatever a switch changed in the workspace before it starts the panel. Hitch listens
-    # on a Unix socket, not a TCP port, so there's no port for a switch to wait on.
-    hitch: [command: "cargo run -p hitch-app", match: ~r/cargo run -p hitch-app|target\/debug\/hitch/]
+    # Rebuilds whatever a switch changed before it starts the panel; hitch-web is the window "Branches" opens.
+    # Hitch listens on a Unix socket, not a TCP port, so there's no port for a switch to wait on.
+    hitch: [
+      command: "cargo build -p hitch-web && cargo run -p hitch-app",
+      match: ~r/cargo (build|run) -p hitch|target\/debug\/hitch/
+    ]
   ],
   panes: [
     # An empty shell at the repo root, for `cargo test --workspace`, `hitch toggle` and the like.

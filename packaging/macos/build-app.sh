@@ -8,7 +8,7 @@ set -eu
 
 cd "$(dirname "$0")/../.."
 
-cargo build --release --locked -p hitch-app
+cargo build --release --locked -p hitch-app -p hitch-web
 
 version=$(cargo pkgid -p hitch-app | sed 's/.*[#@]//')
 app=target/release/Hitch.app
@@ -16,6 +16,8 @@ app=target/release/Hitch.app
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS"
 cp target/release/hitch "$app/Contents/MacOS/hitch"
+# The branch page window, found next to hitch.
+cp target/release/hitch-web "$app/Contents/MacOS/hitch-web"
 sed "s/@VERSION@/$version/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
 plutil -lint "$app/Contents/Info.plist"
 
