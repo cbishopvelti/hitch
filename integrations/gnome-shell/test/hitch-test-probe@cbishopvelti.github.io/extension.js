@@ -18,6 +18,17 @@ const XML = `
     <method name="Activate">
       <arg type="s" name="title" direction="in"/>
     </method>
+    <method name="Rects">
+      <arg type="u" name="pid" direction="in"/>
+      <arg type="s" name="json" direction="out"/>
+    </method>
+    <method name="MoveResize">
+      <arg type="s" name="title" direction="in"/>
+      <arg type="i" name="x" direction="in"/>
+      <arg type="i" name="y" direction="in"/>
+      <arg type="i" name="width" direction="in"/>
+      <arg type="i" name="height" direction="in"/>
+    </method>
     <method name="SetOverview">
       <arg type="b" name="visible" direction="in"/>
     </method>
@@ -43,6 +54,25 @@ export default class Probe extends Extension {
             .map(a => a.get_meta_window())
             .find(w => w?.get_title() === title)
             ?.activate(global.get_current_time());
+    }
+
+    // [[title, x, y, width, height]] of a process's windows.
+    Rects(pid) {
+        return JSON.stringify(global.get_window_actors()
+            .map(a => a.get_meta_window())
+            .filter(w => w && w.get_pid() === pid)
+            .map(w => {
+                const r = w.get_frame_rect();
+                return [w.get_title(), r.x, r.y, r.width, r.height];
+            }));
+    }
+
+    // What dragging the window, or resizing it, does.
+    MoveResize(title, x, y, width, height) {
+        global.get_window_actors()
+            .map(a => a.get_meta_window())
+            .find(w => w?.get_title() === title)
+            ?.move_resize_frame(true, x, y, width, height);
     }
 
     SetOverview(visible) {

@@ -14,11 +14,15 @@ The script opens GTK 4 windows as a stand-in for Hitch and checks that:
   * SetKeepAbove(true) keeps the caller's windows above and on all
     workspaces, including windows opened afterwards,
   * SetKeepAbove(false), the caller leaving the bus, and disabling the
-    extension (as GNOME does on screen lock) undo it.
+    extension (as GNOME does on screen lock) undo it,
+  * DockBeside puts another process's window against this one's side at its
+    height, moves it when this one moves or resizes, and stops when that
+    process leaves the bus.
 """
 
 import json
 import os
+import subprocess
 import sys
 import time
 
@@ -91,6 +95,21 @@ def probe(method, args=None, reply="()"):
         "io.github.cbishopvelti.HitchTestProbe", method, args, GLib.VariantType(reply),
         Gio.DBusCallFlags.NONE, 5000, None).unpack()
 
+
+
+def rects(pid):
+    """{title: (x, y, width, height)} for a process's windows."""
+    (out,) = probe("Rects", GLib.Variant("(u)", (pid,)), "(s)")
+    return {t: tuple(r) for t, *r in json.loads(out)}
+
+
+def docked_to(panel, docked):
+    """Whether `docked` touches a side of `panel` at its top and height."""
+    if not panel or not docked:
+        return False
+    px, py, pw, ph = panel
+    dx, dy, dw, dh = docked
+    return (dx + dw == px or dx == px + pw) and dy == py and dh == ph
 
 
 def last_focus_with_title(title):
@@ -200,6 +219,49 @@ def main():
     call("SetKeepAbove", GLib.Variant("(b)", (False,)))
     check(wait_for(lambda: all(not a and not s for _, a, s in our_windows()), 5.0),
           f"SetKeepAbove(false) undoes it ({our_windows()})")
+
+    # 5b. Dock another process's window beside window A (the branch page
+    # beside the panel).
+    panel = "hitch-test-A renamed"
+
+    def panel_rect():
+        return rects(PID).get(panel)
+
+    def at(x, y):
+        return (panel_rect() or (None, None))[:2] == (x, y)
+
+    probe("MoveResize", GLib.Variant("(siiii)", (panel, 700, 120, 320, 400)))
+    check(wait_for(lambda: at(700, 120), 5.0), f"the probe moved window A ({panel_rect()})")
+    child = subprocess.Popen(
+        [sys.executable, "-I",
+         os.path.join(os.path.dirname(os.path.abspath(__file__)), "dock_child.py"), str(PID)],
+        stdin=subprocess.PIPE)
+
+    def docked_rect():
+        return rects(child.pid).get("hitch-test-docked")
+
+    def docked():
+        return docked_to(panel_rect(), docked_rect())
+
+    check(wait_for(docked, 10.0),
+          f"DockBeside puts the caller's window against the other's side at its height "
+          f"({panel_rect()}, {docked_rect()})")
+    d = docked_rect() or (0, 0, 0, 0)
+    check(d[0] + d[2] == 700, f"on the side with more room, the left ({d})")
+    width = d[2]
+
+    probe("MoveResize", GLib.Variant("(siiii)", (panel, 100, 60, 320, 500)))
+    check(wait_for(lambda: at(100, 60) and docked(), 5.0),
+          f"it follows when the other window moves and resizes ({panel_rect()}, {docked_rect()})")
+    p, d = panel_rect() or (0, 0, 0, 0), docked_rect() or (0, 0, 0, 0)
+    check(d[0] == p[0] + p[2], f"and changes side when the room does ({p}, {d})")
+    check(d[2] == width, f"its width is kept ({d[2]} == {width})")
+
+    child.stdin.close()
+    child.wait(10)
+    probe("MoveResize", GLib.Variant("(siiii)", (panel, 300, 60, 320, 400)))
+    check(wait_for(lambda: at(300, 60), 5.0),
+          f"the other window still moves after the docked one closes ({panel_rect()})")
 
     # 6. Pin from a second connection, then drop that connection: the
     # extension must unpin when the caller leaves the bus.

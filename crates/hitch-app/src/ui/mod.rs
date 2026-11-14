@@ -34,8 +34,9 @@
 //!   the panel focused and no text field taking keys, 1 to 9 copy the code
 //!   blocks in order and Shift+1 to 9 send them.
 //! - **Branches**: when clawswap runs the project you're in, "Branches"
-//!   opens its branch page in a small window beside the panel (see
-//!   [`branches`]).
+//!   shows its branch page against the panel's side, in a window made to
+//!   look like a part of the panel (see [`branches`]). Pressing it again,
+//!   or hiding the panel, closes it.
 //! - **GNOME extension setup**: on GNOME Wayland, when the Hitch extension
 //!   isn't running, the panel lists what's left to do (install, turn on,
 //!   log out and back in), each with a command to copy and, where it can,
@@ -68,7 +69,7 @@ use iced::{
 };
 
 use backend::{ClawswapProjects, Engine, NoteGroup, Store, Watcher};
-use branches::{BranchWindow, Opened};
+use branches::{BranchWindow, Look, Opened};
 use note_view::{Done, NoteViewer, Spot, TaskTarget};
 use panel_state::{Edge, PanelSize, PanelState, SavedChoice};
 
@@ -284,8 +285,11 @@ pub enum Message {
     NewNote,
     /// The projects clawswap's daemon runs changed.
     ClawswapProjects(Vec<hitch_context::clawswap::Project>),
-    /// Open the clawswap branch page of the current project.
-    OpenBranches,
+    /// Show or close the clawswap branch page of the current project.
+    ToggleBranches,
+    /// Open the branch page beside the panel, which is at this position
+    /// (`None` where the panel can't know, as on Wayland).
+    OpenBranchesAt(Option<Point>),
     Edit {
         group: usize,
         note: usize,
@@ -488,8 +492,18 @@ impl Panel {
                 self.clawswap_projects = projects;
                 Task::none()
             }
-            Message::OpenBranches => {
-                self.open_branches();
+            Message::ToggleBranches => {
+                if self.branch_window.is_open() {
+                    self.branch_window.close();
+                    return Task::none();
+                }
+                match self.window {
+                    Some(w) => window::position(w.id).map(Message::OpenBranchesAt),
+                    None => Task::none(),
+                }
+            }
+            Message::OpenBranchesAt(position) => {
+                self.open_branches(position);
                 Task::none()
             }
             Message::Edit { group, note } => self.start_edit(group, note),
@@ -750,6 +764,7 @@ impl Panel {
     fn hide(&mut self) -> Task<Message> {
         self.commit_edit();
         self.save_size();
+        self.branch_window.close();
         match self.window.take() {
             Some(window) => window::close(window.id),
             None => Task::none(),
@@ -1192,11 +1207,25 @@ impl Panel {
         )
     }
 
-    fn open_branches(&mut self) {
+    fn open_branches(&mut self, position: Option<Point>) {
         let Some(project) = self.clawswap_project().cloned() else {
             return;
         };
-        match self.branch_window.open(&project, self.state.pinned) {
+        let size = self.panel_size();
+        let theme = self.markdown_theme();
+        let palette = theme.extended_palette();
+        let hex = |c: iced::Color| branches::hex(c.r, c.g, c.b);
+        // The colours of the panel's own `container::bordered_box`.
+        let look = Look {
+            pinned: self.state.pinned,
+            dark: self.mode == theme::Mode::Dark,
+            height: size.height as f32,
+            position: position.map(|p| Look::beside(p.x, p.y, size.width as f32)),
+            bg: hex(palette.background.weakest.color),
+            fg: hex(palette.background.weakest.text),
+            line: hex(palette.background.weak.color),
+        };
+        match self.branch_window.open(&project, &look) {
             Ok(Opened::Window) => self.error = None,
             Ok(Opened::Browser(why)) => {
                 self.error = Some(format!("Opened the branch page in the browser: {why}."));
@@ -1225,8 +1254,12 @@ impl Panel {
         let branches = self.clawswap_project().map(|project| {
             hint(
                 button(small("Branches"))
-                    .style(button::text)
-                    .on_press(Message::OpenBranches),
+                    .style(if self.branch_window.is_open() {
+                        button::primary
+                    } else {
+                        button::text
+                    })
+                    .on_press(Message::ToggleBranches),
                 format!("Switch or pull {}'s branch with clawswap", project.id),
             )
         });
