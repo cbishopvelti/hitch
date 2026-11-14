@@ -1,5 +1,6 @@
 //! Panel state that survives restarts: whether the panel is pinned, the
-//! screen edge it docks to, and the last "Save to" choice per project.
+//! screen edge it docks to, its size, and the last "Save to" choice per
+//! project.
 //!
 //! Kept in `~/.hitch/panel.json`, apart from `settings.json`, because it is
 //! state the panel changes as you use it rather than a preference you edit.
@@ -25,9 +26,18 @@ pub struct PanelState {
     /// Always on top, on every workspace, until unpinned (spec, UX).
     pub pinned: bool,
     pub edge: Edge,
+    /// The size the panel was last resized to; the default size if none.
+    pub size: Option<PanelSize>,
     /// The last "Save to" choice per project (spec F14), keyed by the
     /// project's notes file. Only choices other than the default are kept.
     pub save_to: BTreeMap<String, SavedChoice>,
+}
+
+/// The panel's size in logical pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PanelSize {
+    pub width: u32,
+    pub height: u32,
 }
 
 /// A remembered "Save to" choice: the notes file, and whether the note is
@@ -94,6 +104,10 @@ mod tests {
         let mut state = PanelState {
             pinned: true,
             edge: Edge::Left,
+            size: Some(PanelSize {
+                width: 400,
+                height: 700,
+            }),
             ..PanelState::default()
         };
         state.save_to.insert(
