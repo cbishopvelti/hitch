@@ -18,6 +18,8 @@
 //! process instead.
 
 mod cli;
+#[cfg(target_os = "linux")]
+mod desktop;
 mod ui;
 
 use std::process::ExitCode;

@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2a9d8f"/>
+      <stop offset="1" stop-color="#1d6f66"/>
+    </linearGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fffaf0"/>
+      <stop offset="1" stop-color="#f3ead6"/>
+    </linearGradient>
+  </defs>
+  <!-- Tile -->
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#bg)"/>
+  <!-- Note card, tilted a little, with a soft shadow -->
+  <g transform="rotate(-6 64 70)">
+    <rect x="31" y="35" width="66" height="72" rx="9" fill="#0f3f3a" opacity="0.28" transform="translate(2 4)"/>
+    <rect x="31" y="35" width="66" height="72" rx="9" fill="url(#card)"/>
+    <rect x="42" y="58" width="44" height="6" rx="3" fill="#2a9d8f"/>
+    <rect x="42" y="72" width="36" height="6" rx="3" fill="#9fc9c3"/>
+    <rect x="42" y="86" width="40" height="6" rx="3" fill="#9fc9c3"/>
+  </g>
+  <!-- The hitch: a hook holding the note -->
+  <path d="M64 16 v18" stroke="#f4a261" stroke-width="7" stroke-linecap="round" fill="none"/>
+  <circle cx="64" cy="42" r="8" fill="none" stroke="#f4a261" stroke-width="7"/>
+</svg>

@@ -33,6 +33,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p hitch-app        # starts the panel
 ```
 
+On Linux, Hitch writes its desktop entry and icon ([`data/`](data/)) to `~/.local/share/applications` and `~/.local/share/icons` when it starts, pointing at the binary that ran. GNOME uses them for the panel's icon in Alt+Tab, the dock and the app grid.
+
 ### With clawswap
 
 [`clawswap.exs`](clawswap.exs) sets the repo up for [clawswap](https://github.com/cbishopvelti/clawswap): `clawswap up` opens a zellij (or tmux) session with the panel running (`cargo run -p hitch-app`) and a shell, and `clawswap switch <branch>` stops the panel, checks the branch out and starts it again. The first `clawswap up`, and any switch that changes them, also installs the GNOME extension (`make -C integrations/gnome-shell install`) and builds the Zellij plugin into `~/.local/share/zellij/plugins/`; clawswap then says what needs a restart to load them.

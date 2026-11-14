@@ -107,6 +107,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => return Err(format!("can't start the context engine: {e}").into()),
     };
     let store = Store::for_user().ok_or("HOME is not set")?;
+    // The icon GNOME shows for the panel in Alt+Tab and the dock.
+    #[cfg(target_os = "linux")]
+    if let Err(e) = crate::desktop::install() {
+        eprintln!("hitch: can't install the desktop entry and icon: {e}");
+    }
     // iced asks for a boot function it may call more than once; the engine
     // and store are handed over on the first call.
     let parts = std::cell::Cell::new(Some((engine, store)));
