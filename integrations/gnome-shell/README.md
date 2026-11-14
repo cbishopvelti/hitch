@@ -16,6 +16,10 @@ Supported: GNOME Shell 50 (Ubuntu 26.04 LTS) and 51 (Ubuntu 26.10).
 
 ## Install (development)
 
+When the extension isn't running, the Hitch panel says why and lists the
+steps left, with an Install button that writes the copy built into Hitch
+to the same folder and turns it on. By hand:
+
 ```sh
 make -C integrations/gnome-shell install   # copies into ~/.local/share/gnome-shell/extensions
 ```
