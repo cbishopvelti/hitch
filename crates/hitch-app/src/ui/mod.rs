@@ -49,13 +49,12 @@ use hitch_store::Note;
 use iced::keyboard::{self, Key, Modifiers, key};
 use iced::widget::markdown::{self, Uri};
 use iced::widget::{
-    button, center, column, container, mouse_area, pick_list, row, rule, scrollable, space, stack,
-    text, text_editor, tooltip,
+    button, center, column, container, mouse_area, pick_list, row, rule, scrollable, space, text,
+    text_editor, tooltip,
 };
 use iced::window::{self, Direction, Level};
 use iced::{
-    Element, Event, Fill, Font, Point, Size, Subscription, Task, Theme, event, font, mouse, system,
-    theme,
+    Element, Event, Fill, Font, Point, Size, Subscription, Task, Theme, event, font, system, theme,
 };
 
 use backend::{Engine, NoteGroup, Store, Watcher};
@@ -1474,7 +1473,10 @@ fn dock_left(_window: Size, _monitor: Size) -> Point {
 /// compositor draws no frame for it, and on X11 there is none to grab).
 #[cfg(not(target_os = "macos"))]
 fn with_resize_grips(panel: Element<'_, Message>) -> Element<'_, Message> {
+    // Imported here, not at the top, so the macOS build has none unused.
     use iced::Length::Fixed;
+    use iced::mouse;
+    use iced::widget::stack;
     use mouse::Interaction::{
         ResizingDiagonallyDown as Nwse, ResizingDiagonallyUp as Nesw,
         ResizingHorizontally as Horizontal, ResizingVertically as Vertical,
