@@ -301,7 +301,7 @@ class HitchShellService {
         const watchId = Gio.bus_watch_name_on_connection(
             Gio.DBus.session, sender, Gio.BusNameWatcherFlags.NONE,
             null, () => this._undock(sender));
-        const dock = {pid, besidePid, watchId, beside: null, besideSignals: []};
+        const dock = {sender, pid, besidePid, watchId, beside: null, besideSignals: [], placed: new WeakSet()};
         this._docks.set(sender, dock);
         this._applyDock(dock);
     }
@@ -334,6 +334,30 @@ class HitchShellService {
         ];
     }
 
+    // A window that asks to be docked as it opens may not have been placed
+    // yet, and Mutter's own placement would then move it away again. So
+    // dock it once more when it is shown and when it has drawn.
+    _applyAgainOncePlaced(dock, win) {
+        if (dock.placed.has(win))
+            return;
+        dock.placed.add(win);
+        const again = () => {
+            if (this._docks.get(dock.sender) === dock)
+                this._applyDock(dock);
+        };
+        const shownId = win.connect('shown', () => {
+            win.disconnect(shownId);
+            again();
+        });
+        const actor = win.get_compositor_private();
+        if (actor) {
+            const frameId = actor.connect('first-frame', () => {
+                actor.disconnect(frameId);
+                again();
+            });
+        }
+    }
+
     // Puts the dock's windows against the side of the window they are
     // beside, at its height, on the side with more room (the left of a
     // panel at the screen's right edge).
@@ -348,6 +372,7 @@ class HitchShellService {
         const to = beside.get_frame_rect();
         const area = beside.get_work_area_current_monitor();
         for (const win of docked) {
+            this._applyAgainOncePlaced(dock, win);
             const rect = win.get_frame_rect();
             const left = to.x - rect.width;
             const right = to.x + to.width;
