@@ -13,6 +13,11 @@
 //!   loses focus. On X11 and macOS the window level does this; on Wayland
 //!   only the shell can, so the context engine asks the GNOME extension
 //!   (`SetKeepAbove`, see docs/PROTOCOL.md).
+//! - **Move and resize**: the panel has no window frame, so it draws its
+//!   own. Dragging the top bar moves it, and dragging an edge or corner
+//!   resizes it; both hand the pointer to the window manager. The size is
+//!   remembered across restarts. On macOS AppKit resizes a frameless
+//!   window at its edges itself.
 //! - **Notes**: read from and written to the HITCH.md files through
 //!   `hitch-store`, and re-read when a shown file changes on disk. Each
 //!   note is an H2 section. "Edit" opens it as Markdown with
@@ -54,11 +59,20 @@ use iced::{
 
 use backend::{Engine, NoteGroup, Store, Watcher};
 use note_view::{Done, NoteViewer, Spot, TaskTarget};
-use panel_state::{Edge, PanelState, SavedChoice};
+use panel_state::{Edge, PanelSize, PanelState, SavedChoice};
 
 /// Panel size from the spec: about 320 px wide.
 const PANEL_WIDTH: f32 = 320.0;
 const PANEL_HEIGHT: f32 = 560.0;
+/// The smallest the panel can be resized to.
+const MIN_WIDTH: f32 = 240.0;
+const MIN_HEIGHT: f32 = 200.0;
+/// How far in from the panel's edges a drag resizes it, and how big the
+/// corners that resize both ways are.
+#[cfg(not(target_os = "macos"))]
+const GRIP: f32 = 5.0;
+#[cfg(not(target_os = "macos"))]
+const CORNER: f32 = 14.0;
 /// Gap between the docked panel and the screen edge (and the top bar).
 const DOCK_MARGIN: f32 = 48.0;
 const TEXT_SIZE: u32 = 14;
@@ -137,6 +151,8 @@ struct Panel {
     /// The button that just copied or sent, and which flash this is.
     flash: Option<(Spot, Done)>,
     flash_count: u64,
+    /// The panel was resized since its size was last saved.
+    size_changed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,7 +184,8 @@ struct PanelWindow {
     /// Whether it has had focus since it opened. Auto-hide waits for this,
     /// so a panel the compositor opened without focus doesn't vanish.
     focused: bool,
-    /// When a drag of the top bar last started.
+    /// When a move (drag of the top bar) or resize (drag of an edge) last
+    /// started.
     drag_started: Option<Instant>,
     /// It lost focus and hides once another window is reported focused.
     blurred: bool,
@@ -177,7 +194,8 @@ struct PanelWindow {
     elsewhere: bool,
 }
 
-/// How long after a drag starts a loss of focus is taken to be the drag's.
+/// How long after a move or resize starts a loss of focus is taken to be
+/// the drag's.
 ///
 /// While the window manager moves a window it grabs the keyboard, and the
 /// panel is told it lost focus: X11 sends FocusOut for the grab, which
@@ -315,6 +333,10 @@ pub enum Message {
     Shortcut(Shortcut),
     ThemeChanged(theme::Mode),
     Drag,
+    /// An edge or corner was pressed: resize the panel that way. Not on
+    /// macOS, which has no grips (see [`with_resize_grips`]).
+    #[cfg(not(target_os = "macos"))]
+    Resize(window::Direction),
     Hide,
     TogglePin,
     NewNote,
@@ -358,6 +380,8 @@ pub enum WindowEvent {
     Unfocused,
     CloseRequested,
     Closed,
+    /// The window's new size, in logical pixels.
+    Resized(PanelSize),
 }
 
 /// Keys handled while the panel has focus. The global shortcuts reach a
@@ -410,6 +434,7 @@ impl Panel {
             modifiers: Modifiers::empty(),
             flash: None,
             flash_count: 0,
+            size_changed: false,
         };
         if panel.state.pinned {
             panel.keep_above();
@@ -499,6 +524,15 @@ impl Panel {
                 Some(w) => {
                     w.drag_started = Some(Instant::now());
                     window::drag(w.id)
+                }
+                None => Task::none(),
+            },
+            // The window manager takes focus while it resizes too.
+            #[cfg(not(target_os = "macos"))]
+            Message::Resize(direction) => match self.window.as_mut() {
+                Some(w) => {
+                    w.drag_started = Some(Instant::now());
+                    window::drag_resize(w.id, direction)
                 }
                 None => Task::none(),
             },
@@ -679,6 +713,7 @@ impl Panel {
             Shortcut::TogglePin => self.toggle_pin(),
             Shortcut::Quit => {
                 self.commit_edit();
+                self.save_size();
                 iced::exit()
             }
             Shortcut::CopyBlock(number) => match self.code_block(number) {
@@ -712,8 +747,36 @@ impl Panel {
             WindowEvent::CloseRequested => self.hide(),
             WindowEvent::Closed => {
                 self.window = None;
+                self.save_size();
                 Task::none()
             }
+            WindowEvent::Resized(size) => {
+                if size != self.panel_size() {
+                    self.state.size = Some(size);
+                    self.size_changed = true;
+                }
+                Task::none()
+            }
+        }
+    }
+
+    /// The panel's size: the last one it was resized to, or the default.
+    fn panel_size(&self) -> PanelSize {
+        self.state.size.unwrap_or(PanelSize {
+            width: PANEL_WIDTH as u32,
+            height: PANEL_HEIGHT as u32,
+        })
+    }
+
+    /// Saves a size changed by resizing. It's saved when the panel hides
+    /// or Hitch quits, not on every step of a resize.
+    fn save_size(&mut self) {
+        if !std::mem::take(&mut self.size_changed) {
+            return;
+        }
+        if let Some(path) = &self.state_path {
+            let result = self.state.save(path);
+            self.report(result);
         }
     }
 
@@ -733,6 +796,7 @@ impl Panel {
     /// running.
     fn hide(&mut self) -> Task<Message> {
         self.commit_edit();
+        self.save_size();
         match self.window.take() {
             Some(window) => window::close(window.id),
             None => Task::none(),
@@ -779,9 +843,13 @@ impl Panel {
     }
 
     fn window_settings(&self) -> window::Settings {
+        let size = self.panel_size();
         window::Settings {
-            size: Size::new(PANEL_WIDTH, PANEL_HEIGHT),
-            min_size: Some(Size::new(240.0, 200.0)),
+            size: Size::new(
+                (size.width as f32).max(MIN_WIDTH),
+                (size.height as f32).max(MIN_HEIGHT),
+            ),
+            min_size: Some(Size::new(MIN_WIDTH, MIN_HEIGHT)),
             // Compositors may ignore this (Wayland does).
             position: window::Position::SpecificWith(match self.state.edge {
                 Edge::Left => dock_left,
@@ -1083,7 +1151,7 @@ impl Panel {
                     .width(Fill),
             );
         }
-        container(body).style(container::bordered_box).into()
+        with_resize_grips(container(body).style(container::bordered_box).into())
     }
 
     fn header(&self) -> Element<'_, Message> {
@@ -1463,6 +1531,67 @@ fn dock_left(_window: Size, _monitor: Size) -> Point {
     Point::new(DOCK_MARGIN, DOCK_MARGIN)
 }
 
+/// Lays invisible strips over the panel's edges and corners that resize it:
+/// the panel has no window frame, so nothing else would (on Wayland the
+/// compositor draws no frame for it, and on X11 there is none to grab).
+#[cfg(not(target_os = "macos"))]
+fn with_resize_grips(panel: Element<'_, Message>) -> Element<'_, Message> {
+    // Imported here, not at the top, so the macOS build has none unused.
+    use iced::Length::Fixed;
+    use iced::mouse;
+    use iced::widget::stack;
+    use iced::window::Direction;
+    use mouse::Interaction::{
+        ResizingDiagonallyDown as Nwse, ResizingDiagonallyUp as Nesw,
+        ResizingHorizontally as Horizontal, ResizingVertically as Vertical,
+    };
+    fn grip<'a>(
+        direction: Direction,
+        interaction: mouse::Interaction,
+        width: impl Into<iced::Length>,
+        height: impl Into<iced::Length>,
+    ) -> Element<'a, Message> {
+        mouse_area(space().width(width).height(height))
+            .interaction(interaction)
+            .on_press(Message::Resize(direction))
+            .into()
+    }
+    let corner =
+        |direction, interaction| grip(direction, interaction, Fixed(CORNER), Fixed(CORNER));
+
+    let edges = column![
+        grip(Direction::North, Vertical, Fill, Fixed(GRIP)),
+        row![
+            grip(Direction::West, Horizontal, Fixed(GRIP), Fill),
+            space().width(Fill),
+            grip(Direction::East, Horizontal, Fixed(GRIP), Fill),
+        ]
+        .height(Fill),
+        grip(Direction::South, Vertical, Fill, Fixed(GRIP)),
+    ];
+    let corners = column![
+        row![
+            corner(Direction::NorthWest, Nwse),
+            space().width(Fill),
+            corner(Direction::NorthEast, Nesw),
+        ],
+        space().height(Fill),
+        row![
+            corner(Direction::SouthWest, Nesw),
+            space().width(Fill),
+            corner(Direction::SouthEast, Nwse),
+        ],
+    ];
+    stack![panel, edges, corners].into()
+}
+
+/// AppKit resizes a frameless window from its edges itself, and winit
+/// can't start a resize there.
+#[cfg(target_os = "macos")]
+fn with_resize_grips(panel: Element<'_, Message>) -> Element<'_, Message> {
+    panel
+}
+
 fn on_event(event: Event, status: event::Status, id: window::Id) -> Option<Message> {
     match event {
         Event::Keyboard(keyboard::Event::KeyPressed {
@@ -1487,6 +1616,10 @@ fn on_event(event: Event, status: event::Status, id: window::Id) -> Option<Messa
                 window::Event::Unfocused => WindowEvent::Unfocused,
                 window::Event::CloseRequested => WindowEvent::CloseRequested,
                 window::Event::Closed => WindowEvent::Closed,
+                window::Event::Resized(size) => WindowEvent::Resized(PanelSize {
+                    width: size.width.round() as u32,
+                    height: size.height.round() as u32,
+                }),
                 _ => return None,
             };
             Some(Message::Window(id, event))
