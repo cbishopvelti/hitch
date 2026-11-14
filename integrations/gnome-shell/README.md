@@ -60,6 +60,9 @@ gdbus monitor --session -d io.github.cbishopvelti.Hitch.Shell   # watch FocusCha
   <method name="SetKeepAbove">
     <arg type="b" name="pinned" direction="in"/>
   </method>
+  <method name="DockBeside">
+    <arg type="u" name="pid" direction="in"/>
+  </method>
   <signal name="FocusChanged">
     <arg type="a{sv}" name="focus"/>
   </signal>
@@ -91,6 +94,12 @@ another's windows) is kept above other windows and shown on all workspaces,
 including windows it opens later. `false` undoes it. The pin is also dropped
 when the caller disconnects from the bus, so a crashed Hitch never leaves a
 window stuck on top.
+
+**`DockBeside(pid)`**: the calling process's windows are put against the
+side of process `pid`'s window, at its top and height, on the side with more
+room, and follow it when it moves or resizes. It lasts until the caller
+disconnects from the bus. `hitch-web` (the clawswap branch page) calls it
+with the panel's pid, since a Wayland app can't place its own windows.
 
 **`Version`** is 1. It goes up when the interface changes incompatibly.
 
