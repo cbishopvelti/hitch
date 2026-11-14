@@ -395,6 +395,10 @@ mod dbus {
             ),),
         )
         .unwrap();
+        // At once, for the panel's auto-hide, then debounced contexts.
+        next(&rx, |e| {
+            matches!(e, Event::OtherWindowFocused).then_some(())
+        });
         assert_eq!(
             contexts(&rx)[0],
             Context::File {
