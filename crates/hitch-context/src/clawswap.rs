@@ -32,12 +32,16 @@
 //! isn't running (it exits once it has no projects), this source retries
 //! with backoff from 1 s up to 30 s.
 //!
+//! [`projects`] asks the daemon once for the projects it runs, so the panel
+//! can offer the branch page ([`page_url`]) of the one you're working in
+//! ([`project_for`]).
+//!
 //! The client is plain `std` (one HTTP/1.1 request on a `TcpStream`, chunked
 //! decoding, SSE parsing), so it adds no async runtime or HTTP crate.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -117,6 +121,82 @@ pub struct FocusEvent {
 /// project).
 pub fn parse_focus(data: &str) -> Result<Option<FocusEvent>, serde_json::Error> {
     serde_json::from_str(data)
+}
+
+/// Path of the daemon's project list.
+pub const PROJECTS_PATH: &str = "/projects";
+
+/// A project the daemon runs, from `GET /projects`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Project {
+    /// clawswap's project id, its session's name. Its page is `/p/<id>`.
+    pub id: String,
+    /// The name its page shows.
+    #[serde(default)]
+    pub name: String,
+    /// The checkout's root folder.
+    pub root: PathBuf,
+}
+
+#[derive(Deserialize)]
+struct ProjectList {
+    projects: Vec<Project>,
+}
+
+/// The projects the daemon runs now. An error when it isn't running (the
+/// connection is refused) or answers something else.
+pub fn projects(config: &ClawswapConfig) -> io::Result<Vec<Project>> {
+    let mut stream = TcpStream::connect_timeout(&config.addr, Duration::from_secs(1))?;
+    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(3)))?;
+    write!(
+        stream,
+        "GET {PROJECTS_PATH} HTTP/1.1\r\n\
+         Host: 127.0.0.1:{port}\r\n\
+         Accept: application/json\r\n\
+         User-Agent: hitch/{version}\r\n\
+         Connection: close\r\n\r\n",
+        port = config.addr.port(),
+        version = env!("CARGO_PKG_VERSION"),
+    )?;
+    stream.flush()?;
+    let mut reader = BufReader::new(stream);
+    let chunked = read_head(&mut reader)?;
+    let mut body = String::new();
+    if chunked {
+        Chunked::new(reader).read_to_string(&mut body)?;
+    } else {
+        reader.read_to_string(&mut body)?;
+    }
+    let list: ProjectList = serde_json::from_str(&body).map_err(io::Error::other)?;
+    Ok(list.projects)
+}
+
+/// The project whose checkout holds one of `folders`: the deepest root
+/// when checkouts are nested.
+pub fn project_for<'a, 'p>(
+    projects: &'p [Project],
+    folders: impl IntoIterator<Item = &'a Path>,
+) -> Option<&'p Project> {
+    let folders: Vec<&Path> = folders.into_iter().collect();
+    projects
+        .iter()
+        .filter(|p| !p.root.as_os_str().is_empty())
+        .filter(|p| folders.iter().any(|f| f.starts_with(&p.root)))
+        .max_by_key(|p| p.root.components().count())
+}
+
+/// The address of a project's branch page on the daemon.
+pub fn page_url(config: &ClawswapConfig, id: &str) -> String {
+    let mut path = String::new();
+    for b in id.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+            path.push(b as char);
+        } else {
+            path.push_str(&format!("%{b:02X}"));
+        }
+    }
+    format!("http://127.0.0.1:{}/p/{path}", config.addr.port())
 }
 
 /// The message the engine gets for a focus event.
@@ -593,6 +673,114 @@ mod tests {
         assert_eq!(got, vec![context("/code/a"), blur(), context("/code/c")]);
         drop(handle);
         server.join().unwrap();
+    }
+
+    /// Answers one request for `path` with `body` as JSON.
+    fn serve_json(listener: TcpListener, path: &'static str, body: &'static str, chunked: bool) {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut req = BufReader::new(stream.try_clone().unwrap());
+        let mut first = String::new();
+        req.read_line(&mut first).unwrap();
+        assert!(
+            first.starts_with(&format!("GET {path} HTTP/1.1")),
+            "{first}"
+        );
+        loop {
+            let mut l = String::new();
+            req.read_line(&mut l).unwrap();
+            if l.trim().is_empty() {
+                break;
+            }
+        }
+        if chunked {
+            let (a, b) = body.split_at(body.len() / 2);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\n\r\n\
+                 {:x}\r\n{a}\r\n{:x}\r\n{b}\r\n0\r\n\r\n",
+                a.len(),
+                b.len()
+            )
+            .unwrap();
+        } else {
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        }
+    }
+
+    const PROJECTS: &str = r#"{"projects":[{"id":"hitch","name":"hitch","root":"/code/hitch","port":27390},{"id":"shop","name":"shop","root":"/code/shop","port":27390}],"selected":"hitch","focused":null}"#;
+
+    #[test]
+    fn lists_projects() {
+        for chunked in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let cfg = config(&listener);
+            let server =
+                std::thread::spawn(move || serve_json(listener, "/projects", PROJECTS, chunked));
+            let got = projects(&cfg).unwrap();
+            server.join().unwrap();
+            assert_eq!(
+                got,
+                vec![
+                    Project {
+                        id: "hitch".into(),
+                        name: "hitch".into(),
+                        root: "/code/hitch".into()
+                    },
+                    Project {
+                        id: "shop".into(),
+                        name: "shop".into(),
+                        root: "/code/shop".into()
+                    },
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn no_daemon_is_an_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let cfg = config(&listener);
+        drop(listener);
+        assert!(projects(&cfg).is_err());
+    }
+
+    #[test]
+    fn finds_the_project_holding_a_folder() {
+        let project = |id: &str, root: &str| Project {
+            id: id.into(),
+            name: id.into(),
+            root: root.into(),
+        };
+        let list = [
+            project("shop", "/code/shop"),
+            project("api", "/code/shop/api"),
+            project("hitch", "/code/hitch"),
+        ];
+        let id = |folders: &[&str]| {
+            project_for(&list, folders.iter().map(Path::new)).map(|p| p.id.as_str())
+        };
+        assert_eq!(id(&["/code/hitch"]), Some("hitch"));
+        assert_eq!(id(&["/code/hitch/crates/hitch-app"]), Some("hitch"));
+        assert_eq!(id(&["/code/shop/api/lib"]), Some("api"));
+        assert_eq!(id(&["/code/shop/web"]), Some("shop"));
+        // A path component, not a string prefix.
+        assert_eq!(id(&["/code/hitchhiker"]), None);
+        assert_eq!(id(&[]), None);
+    }
+
+    #[test]
+    fn page_urls() {
+        let cfg = ClawswapConfig::with_port(27390);
+        assert_eq!(page_url(&cfg, "hitch"), "http://127.0.0.1:27390/p/hitch");
+        assert_eq!(
+            page_url(&cfg, "a b/c"),
+            "http://127.0.0.1:27390/p/a%20b%2Fc"
+        );
     }
 
     #[test]

@@ -93,6 +93,45 @@ impl Engine {
     }
 }
 
+/// The projects clawswap's daemon runs, asked for every few seconds on a
+/// thread of its own. Reports the list when it changes; an empty list while
+/// the daemon isn't running.
+pub struct ClawswapProjects {
+    lists: Events<Vec<hitch_context::clawswap::Project>>,
+}
+
+impl ClawswapProjects {
+    const EVERY: std::time::Duration = std::time::Duration::from_secs(4);
+
+    pub fn start() -> Self {
+        let (tx, rx) = mpsc::unbounded();
+        let config = hitch_context::clawswap::ClawswapConfig::from_env();
+        std::thread::Builder::new()
+            .name("hitch-clawswap-projects".into())
+            .spawn(move || {
+                let mut last = None;
+                loop {
+                    let list = hitch_context::clawswap::projects(&config).unwrap_or_default();
+                    if last.as_ref() != Some(&list) {
+                        if tx.unbounded_send(list.clone()).is_err() {
+                            return;
+                        }
+                        last = Some(list);
+                    }
+                    std::thread::sleep(Self::EVERY);
+                }
+            })
+            .expect("spawn clawswap projects thread");
+        Self {
+            lists: Events::new(rx),
+        }
+    }
+
+    pub fn subscription(&self) -> Subscription<Vec<hitch_context::clawswap::Project>> {
+        self.lists.subscription()
+    }
+}
+
 /// Watches the notes files the panel shows, so edits made in an editor or
 /// by `git pull` appear while the panel is open.
 pub struct Watcher {

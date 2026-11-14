@@ -1,0 +1,21 @@
+[package]
+name = "hitch-web"
+description = "A small webview window Hitch opens for clawswap's branch page"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+hitch-protocol.workspace = true
+tao = "0.37"
+wry = "0.57"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = "5"
+# The same GTK 3 bindings tao uses, to set the program name.
+gtk = "0.18"
+
+[lints]
+workspace = true

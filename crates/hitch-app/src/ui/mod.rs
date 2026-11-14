@@ -33,8 +33,12 @@
 //!   focused Zellij pane unrun (Shift+click runs it; see [`zellij`]). With
 //!   the panel focused and no text field taking keys, 1 to 9 copy the code
 //!   blocks in order and Shift+1 to 9 send them.
+//! - **Branches**: when clawswap runs the project you're in, "Branches"
+//!   opens its branch page in a small window beside the panel (see
+//!   [`branches`]).
 
 mod backend;
+mod branches;
 mod label;
 mod note_view;
 mod panel_state;
@@ -58,7 +62,8 @@ use iced::{
     Element, Event, Fill, Font, Point, Size, Subscription, Task, Theme, event, font, system, theme,
 };
 
-use backend::{Engine, NoteGroup, Store, Watcher};
+use backend::{ClawswapProjects, Engine, NoteGroup, Store, Watcher};
+use branches::{BranchWindow, Opened};
 use note_view::{Done, NoteViewer, Spot, TaskTarget};
 use panel_state::{Edge, PanelSize, PanelState, SavedChoice};
 
@@ -151,6 +156,10 @@ struct Panel {
     flash_count: u64,
     /// The panel was resized since its size was last saved.
     size_changed: bool,
+    /// The projects clawswap's daemon runs (empty when it isn't running).
+    clawswap: ClawswapProjects,
+    clawswap_projects: Vec<hitch_context::clawswap::Project>,
+    branch_window: BranchWindow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -258,6 +267,10 @@ pub enum Message {
     Hide,
     TogglePin,
     NewNote,
+    /// The projects clawswap's daemon runs changed.
+    ClawswapProjects(Vec<hitch_context::clawswap::Project>),
+    /// Open the clawswap branch page of the current project.
+    OpenBranches,
     Edit {
         group: usize,
         note: usize,
@@ -352,6 +365,9 @@ impl Panel {
             flash: None,
             flash_count: 0,
             size_changed: false,
+            clawswap: ClawswapProjects::start(),
+            clawswap_projects: Vec::new(),
+            branch_window: BranchWindow::default(),
         };
         if panel.state.pinned {
             panel.keep_above();
@@ -381,6 +397,7 @@ impl Panel {
             self.watcher.subscription().map(|_| Message::NotesChanged),
             event::listen_with(on_event),
             system::theme_changes().map(Message::ThemeChanged),
+            self.clawswap.subscription().map(Message::ClawswapProjects),
         ])
     }
 
@@ -436,6 +453,14 @@ impl Panel {
             Message::Hide => self.hide(),
             Message::TogglePin => self.toggle_pin(),
             Message::NewNote => self.start_new_note(),
+            Message::ClawswapProjects(projects) => {
+                self.clawswap_projects = projects;
+                Task::none()
+            }
+            Message::OpenBranches => {
+                self.open_branches();
+                Task::none()
+            }
             Message::Edit { group, note } => self.start_edit(group, note),
             Message::HitchTo(choice) => {
                 if let Some(Editor {
@@ -612,6 +637,7 @@ impl Panel {
             Shortcut::Quit => {
                 self.commit_edit();
                 self.save_size();
+                self.branch_window.close();
                 iced::exit()
             }
             Shortcut::CopyBlock(number) => match self.code_block(number) {
@@ -1050,6 +1076,28 @@ impl Panel {
         with_resize_grips(container(body).style(container::bordered_box).into())
     }
 
+    /// The clawswap project the active contexts are in, if its daemon is
+    /// running.
+    fn clawswap_project(&self) -> Option<&hitch_context::clawswap::Project> {
+        hitch_context::clawswap::project_for(
+            &self.clawswap_projects,
+            branches::folders(&self.contexts.contexts),
+        )
+    }
+
+    fn open_branches(&mut self) {
+        let Some(project) = self.clawswap_project().cloned() else {
+            return;
+        };
+        match self.branch_window.open(&project, self.state.pinned) {
+            Ok(Opened::Window) => self.error = None,
+            Ok(Opened::Browser(why)) => {
+                self.error = Some(format!("Opened the branch page in the browser: {why}."));
+            }
+            Err(e) => self.error = Some(format!("Can't open the branch page: {e}")),
+        }
+    }
+
     fn header(&self) -> Element<'_, Message> {
         let title = mouse_area(
             container(text("Hitch").size(15).font(BOLD))
@@ -1067,26 +1115,37 @@ impl Panel {
             })
             .on_press(Message::TogglePin);
 
-        row![
-            title,
+        let branches = self.clawswap_project().map(|project| {
             hint(
+                button(small("Branches"))
+                    .style(button::text)
+                    .on_press(Message::OpenBranches),
+                format!("Switch or pull {}'s branch with clawswap", project.id),
+            )
+        });
+
+        row![title]
+            .push(branches)
+            .push(hint(
                 button(small("+ Note"))
                     .style(button::text)
                     .on_press(Message::NewNote),
                 format!("Add a note ({MOD}+Shift+H)"),
-            ),
-            hint(pin, format!("Keep on top of other windows ({MOD}+Shift+P)")),
-            hint(
+            ))
+            .push(hint(
+                pin,
+                format!("Keep on top of other windows ({MOD}+Shift+P)"),
+            ))
+            .push(hint(
                 button(small("Hide"))
                     .style(button::text)
                     .on_press(Message::Hide),
                 format!("Hide the panel ({MOD}+Shift+N)"),
-            ),
-        ]
-        .spacing(2)
-        .padding(iced::Padding::ZERO.right(6))
-        .align_y(iced::Center)
-        .into()
+            ))
+            .spacing(2)
+            .padding(iced::Padding::ZERO.right(6))
+            .align_y(iced::Center)
+            .into()
     }
 
     fn notes_view(&self) -> Element<'_, Message> {

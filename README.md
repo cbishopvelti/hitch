@@ -15,6 +15,7 @@ Ubuntu (latest, Wayland) first, then macOS. Early development: nothing works yet
 | `crates/hitch-store` | HITCH.md parsing and writing, project folder resolution, fallback files, SQLite index |
 | `crates/hitch-context` | Context engine: GNOME D-Bus focus, macOS focus, socket server, clawswap client, resolver, debounce |
 | `crates/hitch-macos` | macOS glue: frontmost app (NSWorkspace), window title and file (Accessibility API), pin on every Space, global shortcuts. The only crate with `unsafe` |
+| `crates/hitch-web` | `hitch-web`, the small web view window the panel's "Branches" button opens for clawswap's branch page (wry: WebKitGTK on Linux, WKWebView on macOS) |
 | `crates/hitch-app` | The `hitch` binary: iced panel, quick capture, and the CLI (`hitch toggle`, `hitch send`, ...) |
 | `integrations/gnome-shell` | GNOME Shell extension that reports the focused window over D-Bus and pins the panel |
 | `integrations/zed` | Zed extension (wasm, separate Cargo project) |
@@ -36,7 +37,9 @@ cargo run -p hitch-app        # starts the panel
 
 [`clawswap.exs`](clawswap.exs) sets the repo up for [clawswap](https://github.com/cbishopvelti/clawswap): `clawswap up` opens a zellij (or tmux) session with the panel running (`cargo run -p hitch-app`) and a shell, and `clawswap switch <branch>` stops the panel, checks the branch out and starts it again. The first `clawswap up`, and any switch that changes them, also installs the GNOME extension (`make -C integrations/gnome-shell install`) and builds the Zellij plugin into `~/.local/share/zellij/plugins/`; clawswap then says what needs a restart to load them.
 
-Rust 1.88 or newer. CI runs the same checks on Ubuntu and macOS and also builds `hitch-protocol` for `wasm32-wasip1`.
+While clawswap runs the project you're working in, the panel shows **Branches**. It opens that project's branch page (`http://127.0.0.1:27390/p/<id>`, with its Switch and Pull buttons) in `hitch-web`, a small window beside the panel, kept on top while the panel is pinned. Links off the page open in your browser. Without `hitch-web` next to `hitch` or on your PATH, the page opens in the browser instead.
+
+Rust 1.88 or newer. On Ubuntu, `hitch-web` needs WebKitGTK: `sudo apt install libwebkit2gtk-4.1-dev`. CI runs the same checks on Ubuntu and macOS and also builds `hitch-protocol` for `wasm32-wasip1`.
 
 ## macOS
 
