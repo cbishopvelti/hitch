@@ -9,15 +9,17 @@
 //!   and Send to Zellij buttons on hover (spec F12, F13). Keys 1 to 9 use
 //!   the same numbers: [`code_blocks`] lists the same blocks, in the same
 //!   order, as raw text.
+//! - **Text**: paragraphs, headings and code blocks can be selected with the
+//!   mouse and copied with Ctrl+C ([`super::select`]).
 
 use std::cell::Cell;
 use std::ops::Range;
 
-use iced::widget::markdown::{self, Bullet, Item, Settings, Uri, Viewer};
+use iced::widget::markdown::{self, Bullet, HeadingLevel, Item, Settings, Uri, Viewer};
 use iced::widget::{button, checkbox, column, container, hover, row, scrollable, stack, text};
-use iced::{Element, Fill, Font, alignment};
+use iced::{Element, Fill, Font, Pixels, alignment, padding};
 
-use super::Message;
+use super::{Message, select};
 
 /// The parser options iced's Markdown widget uses, so task markers found
 /// here are the ones the preview draws.
@@ -237,7 +239,7 @@ fn code_block<'a>(settings: Settings, code: &'a str) -> Element<'a, Message> {
     container(
         scrollable(
             container(
-                text(code.trim_end_matches('\n'))
+                select::plain(code.trim_end_matches('\n'), Message::CopySelection)
                     .font(Font::MONOSPACE)
                     .size(settings.code_size),
             )
@@ -308,6 +310,43 @@ fn bullet_items(bullet: &Bullet) -> &[Item] {
 impl<'a> Viewer<'a, Message> for NoteViewer {
     fn on_link_click(url: Uri) -> Message {
         Message::LinkClicked(url)
+    }
+
+    fn heading(
+        &self,
+        settings: Settings,
+        level: &'a HeadingLevel,
+        text: &'a markdown::Text,
+        index: usize,
+    ) -> Element<'a, Message> {
+        let size = match level {
+            HeadingLevel::H1 => settings.h1_size,
+            HeadingLevel::H2 => settings.h2_size,
+            HeadingLevel::H3 => settings.h3_size,
+            HeadingLevel::H4 => settings.h4_size,
+            HeadingLevel::H5 => settings.h5_size,
+            HeadingLevel::H6 => settings.h6_size,
+        };
+        // The same gap above as iced's own headings.
+        let gap = if index > 0 {
+            settings.text_size / 2.0
+        } else {
+            Pixels::ZERO
+        };
+        container(
+            select::rich(text.spans(settings.style), Message::CopySelection)
+                .size(size)
+                .on_link_click(Self::on_link_click),
+        )
+        .padding(padding::top(gap))
+        .into()
+    }
+
+    fn paragraph(&self, settings: Settings, text: &markdown::Text) -> Element<'a, Message> {
+        select::rich(text.spans(settings.style), Message::CopySelection)
+            .size(settings.text_size)
+            .on_link_click(Self::on_link_click)
+            .into()
     }
 
     fn unordered_list(&self, settings: Settings, bullets: &'a [Bullet]) -> Element<'a, Message> {
