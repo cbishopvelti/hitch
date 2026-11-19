@@ -47,6 +47,7 @@ mod branches;
 mod label;
 mod note_view;
 mod panel_state;
+mod select;
 mod shell_setup;
 mod zellij;
 
@@ -305,6 +306,8 @@ pub enum Message {
         done: bool,
     },
     LinkClicked(Uri),
+    /// Copy text the user selected (Ctrl+C on selected note text).
+    CopySelection(String),
     /// Copy `text`; the button at `spot` says "Copied".
     Copy {
         text: String,
@@ -549,6 +552,7 @@ impl Panel {
                 Task::none()
             }
             Message::Copy { text, spot } => self.copy(text, spot),
+            Message::CopySelection(text) => self.copy_selection(text),
             Message::SendToZellij { text, spot } => {
                 self.send_to_zellij(text, spot, self.modifiers.shift())
             }
@@ -575,23 +579,33 @@ impl Panel {
         }
     }
 
-    /// Puts `text` on the clipboard.
+    /// Puts `text` on the clipboard; the button at `spot` says "Copied".
     fn copy(&mut self, text: String, spot: Spot) -> Task<Message> {
-        let copied = match &mut self.clipboard {
-            Some(clipboard) => clipboard.set_text(text),
-            None => {
-                return Task::batch([iced::clipboard::write(text), self.flash(spot, Done::Copied)]);
-            }
-        };
-        match copied {
-            Ok(()) => {
-                self.error = None;
-                self.flash(spot, Done::Copied)
-            }
+        match self.put_on_clipboard(text) {
+            Ok(task) => Task::batch([task, self.flash(spot, Done::Copied)]),
             Err(e) => {
                 self.error = Some(format!("Couldn't copy: {e}"));
                 Task::none()
             }
+        }
+    }
+
+    /// Puts selected text on the clipboard.
+    fn copy_selection(&mut self, text: String) -> Task<Message> {
+        self.put_on_clipboard(text).unwrap_or_else(|e| {
+            self.error = Some(format!("Couldn't copy: {e}"));
+            Task::none()
+        })
+    }
+
+    fn put_on_clipboard(&mut self, text: String) -> Result<Task<Message>, arboard::Error> {
+        match &mut self.clipboard {
+            Some(clipboard) => {
+                clipboard.set_text(text)?;
+                self.error = None;
+                Ok(Task::none())
+            }
+            None => Ok(iced::clipboard::write(text)),
         }
     }
 
@@ -1369,8 +1383,15 @@ impl Panel {
 
         let spot = Spot::Note { group, note };
         let copied = self.flash == Some((spot, Done::Copied));
-        let mut title =
-            row![text(&shown.note.title).size(15).font(BOLD).width(Fill)].align_y(iced::Center);
+        let mut title = row![
+            container(
+                select::plain(&shown.note.title, Message::CopySelection)
+                    .size(15)
+                    .font(BOLD)
+            )
+            .width(Fill)
+        ]
+        .align_y(iced::Center);
         if !shown.note.body.trim().is_empty() {
             title = title.push(hint(
                 button(text(if copied { "Copied" } else { "Copy" }).size(12))
