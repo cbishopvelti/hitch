@@ -9,7 +9,10 @@ publish = false
 
 [dependencies]
 hitch-protocol.workspace = true
-tao = "0.37"
+# tao's default "dbus" feature links the C libdbus (libdbus-1-dev at build
+# time) only to read the desktop portal's dark/light setting. hitch-web sets
+# its theme itself (--dark), so leave it off and keep the build pure Rust.
+tao = { version = "0.37", default-features = false, features = ["rwh_06", "x11"] }
 wry = "0.57"
 
 [target.'cfg(target_os = "linux")'.dependencies]

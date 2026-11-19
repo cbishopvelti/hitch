@@ -43,6 +43,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # GitHub's runners ship libdbus-1-dev, so a dependency that links the C
+      # libdbus would build here but fail on a clean Ubuntu desktop. Keep it out.
+      - name: No C libdbus in the dependency tree
+        run: "! cargo tree --workspace --target all -i libdbus-sys"
       - run: cargo build --workspace --all-targets
       - run: cargo test --workspace
 
