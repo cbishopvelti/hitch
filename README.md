@@ -25,6 +25,14 @@ Dependencies point one way: `hitch-app` → `hitch-context` → `hitch-store` �
 
 ## Build
 
+You need Rust 1.88 or newer. On Ubuntu, install WebKitGTK for `hitch-web` first:
+
+```sh
+sudo apt install libwebkit2gtk-4.1-dev
+```
+
+That is the only system package the build needs. Nothing else links a C library through pkg-config (the D-Bus code uses zbus, which is pure Rust), and CI fails if `libdbus-sys` comes back into the dependency tree. macOS needs nothing beyond Xcode's command line tools.
+
 ```sh
 cargo build
 cargo test --workspace
@@ -41,7 +49,7 @@ On Linux, Hitch writes its desktop entry and icon ([`data/`](data/)) to `~/.loca
 
 While clawswap runs the project you're working in, the panel shows **Branches**. It shows that project's branch page (`http://127.0.0.1:27390/p/<id>`, with its Switch and Pull buttons) in `hitch-web`, a frameless window in the panel's colours against the panel's side, at its height and kept on top while the panel is pinned. Pressing Branches again, or hiding the panel, closes it. On GNOME Wayland the Hitch extension places the window and moves it with the panel (reinstall the extension and log in again after updating); on X11 and macOS it is placed when it opens. Links off the page open in your browser. Without `hitch-web` next to `hitch` or on your PATH, the page opens in the browser instead.
 
-Rust 1.88 or newer. On Ubuntu, `hitch-web` needs WebKitGTK: `sudo apt install libwebkit2gtk-4.1-dev`. CI runs the same checks on Ubuntu and macOS and also builds `hitch-protocol` for `wasm32-wasip1`.
+CI runs the same checks on Ubuntu and macOS and also builds `hitch-protocol` for `wasm32-wasip1`.
 
 ## macOS
 
